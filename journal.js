@@ -137,8 +137,11 @@ export function claimNext(role, claimedBy = 'worker') {
       return null;
     }
 
+    // attempts НЕ трогаем здесь: захват — не то же самое, что фактическая
+    // попытка (budget-стоп может отвести только что захваченную задачу в
+    // blocked_needs_human ДО вызова кодера — см. incrementAttempts).
     const res = d.prepare(`
-      UPDATE tasks SET status='claimed', claimed_by=?, attempts=attempts+1
+      UPDATE tasks SET status='claimed', claimed_by=?
       WHERE id=? AND status='pending'
     `).run(claimedBy, row.id);
 
@@ -165,6 +168,12 @@ export function setStatus(id, status, extra = {}) {
   if ('question' in extra) { fields.push('question = ?'); args.push(extra.question ?? null); }
   args.push(id);
   db().prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`).run(...args);
+}
+
+/** Отмечает начало РЕАЛЬНОЙ попытки (вызов кодера уже точно состоится). */
+export function incrementAttempts(id) {
+  db().prepare(`UPDATE tasks SET attempts = attempts + 1 WHERE id = ?`).run(id);
+  return getTask(id)?.attempts;
 }
 
 /** Прибавляет фактическую стоимость вызова к spent_usd. Возвращает новый spent_usd. */

@@ -1,17 +1,18 @@
 // coordinator.js — детерминированный код БЕЗ LLM (§2, §7 ТЗ v4): захват →
 // исполнение → вердикт. Лестница попыток задачи (§7): 1) claimNext → coder →
 // tester; провал → назад в pending (следующая попытка теми же ролями);
-// MAX_ATTEMPTS исчерпан → blocked_needs_human. Фаза 1: без эскалации тиров
+// MAX_ATTEMPTS исчерпан → blocked_needs_human. Без ручной эскалации тиров
 // внутри лестницы (эскалация тиров живёт в цепочках gateway/ROLES) — просто
-// attempts (DEV_GUIDE §3).
+// attempts (DEV_GUIDE §3). Бюджет (§13) проверяется ДО каждой попытки —
+// attempts инкрементится ПОСЛЕ этой проверки, не при захвате (Фаза 2).
 import path from 'node:path';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import {
   claimNext, setStatus, addSpent, isOverBudget, releaseStuck, newRunId,
-  logEvent, listEvents, getTask,
+  logEvent, listEvents, getTask, incrementAttempts,
 } from './journal.js';
-import { runCoder } from './agents/coder.js';
+import { runCoder, clearEyesState } from './agents/coder.js';
 import { runTester } from './agents/tester.js';
 import { WORKSPACE, MAX_ATTEMPTS } from './config.js';
 
@@ -73,6 +74,7 @@ function handleAttemptFailure(task, runId, report) {
       run_id: runId, task_id: task.id, type: 'status', agent: 'coordinator',
       payload: { event: 'max_attempts_reached', attempts: fresh.attempts },
     });
+    clearEyesState(task.id);
     return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'max_attempts' };
   }
   setStatus(task.id, 'pending', { feedback: report });
@@ -89,26 +91,33 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
 
   logEvent({
     run_id: runId, task_id: task.id, type: 'status', agent: 'coordinator',
-    payload: { event: 'claimed', attempt: task.attempts, role },
+    payload: { event: 'claimed', attemptsSoFar: task.attempts, role },
   });
 
+  // Бюджет проверяется ДО следующего вызова (§13) — захват сам по себе ещё
+  // не тратит деньги, поэтому attempts инкрементится только ПОСЛЕ этой
+  // проверки (incrementAttempts), а не в claimNext.
   if (isOverBudget(task.id)) {
     setStatus(task.id, 'blocked_needs_human', { feedback: 'FAIL: budget_usd задачи исчерпан до начала попытки' });
+    clearEyesState(task.id);
     return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'budget' };
   }
 
-  const coderResult = await runCoder({ task, workspaceDir, runId });
+  incrementAttempts(task.id);
+  const task2 = getTask(task.id);
+  const coderResult = await runCoder({ task: task2, workspaceDir, runId });
   addSpent(task.id, sumRunCost(runId, task.id));
 
   if (coderResult.type === 'question') {
     setStatus(task.id, 'blocked_needs_human', { question: coderResult.question });
+    clearEyesState(task.id);
     return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'question' };
   }
   if (coderResult.type === 'error') {
     return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`);
   }
 
-  autoCommit(workspaceDir, `loom: coder attempt ${task.attempts} on ${task.id} (${coderResult.written.length} файлов)`);
+  autoCommit(workspaceDir, `loom: coder attempt ${task2.attempts} on ${task.id} (${coderResult.written.length} файлов)`);
 
   const testResult = await runTester({ task, workspaceDir });
   logEvent({
@@ -119,6 +128,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
   if (testResult.pass) {
     setStatus(task.id, 'done', { feedback: testResult.report });
     autoCommit(workspaceDir, `loom: done ${task.id}`);
+    clearEyesState(task.id);
     return { task: getTask(task.id), verdict: 'done' };
   }
 

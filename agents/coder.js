@@ -26,32 +26,98 @@ function listFilesRecursive(dir, base = dir, acc = []) {
   return acc;
 }
 
+function fileBlock(workspaceDir, relPath) {
+  const abs = path.join(workspaceDir, relPath);
+  const relPosix = relPath.split(path.sep).join('/');
+  const ext = path.extname(relPath).toLowerCase();
+  let stat;
+  try { stat = fs.statSync(abs); } catch { return `=== ${relPosix} ===\n[недоступен]`; }
+
+  const ignoredByName = EYES_IGNORE_PATTERNS.some((re) => re.test(relPath));
+  if (ignoredByName || EYES_BINARY_EXT.has(ext) || stat.size > EYES_MAX_FILE_BYTES) {
+    return `=== ${relPosix} ===\n[библиотека/бинарник, ${stat.size}Б — не читается; сторонние библиотеки подключай через CDN <script src>, не переписывай файлом]`;
+  }
+  const content = fs.readFileSync(abs, 'utf8');
+  return `=== ${relPosix} ===\n${content}`;
+}
+
 /**
- * Глаза кодера — Фаза 1: ПОЛНЫЙ снимок workspace (дельта — Фаза 2, §6.1).
- * Фильтр мусора СРАЗУ (шрам 30): .min/бинарники/>50КБ → строка-заглушка,
- * никогда не льём содержимое таких файлов в контекст.
+ * Полный снимок workspace: имя+содержимое (с фильтром мусора, шрам 30)
+ * каждого файла.
  */
 export function buildEyes(workspaceDir) {
   if (!fs.existsSync(workspaceDir)) return '(workspace пуст — файлов ещё нет)';
   const files = listFilesRecursive(workspaceDir).sort();
   if (!files.length) return '(workspace пуст — файлов ещё нет)';
+  return files.map((relPath) => fileBlock(workspaceDir, relPath)).join('\n\n');
+}
 
-  const blocks = files.map((relPath) => {
+function snapshotMeta(workspaceDir) {
+  const map = new Map();
+  for (const relPath of listFilesRecursive(workspaceDir)) {
     const abs = path.join(workspaceDir, relPath);
-    const relPosix = relPath.split(path.sep).join('/');
-    const ext = path.extname(relPath).toLowerCase();
-    let stat;
-    try { stat = fs.statSync(abs); } catch { return `=== ${relPosix} ===\n[недоступен]`; }
+    try {
+      const stat = fs.statSync(abs);
+      map.set(relPath, { size: stat.size, mtimeMs: stat.mtimeMs });
+    } catch { /* файл исчез между листингом и stat — пропускаем */ }
+  }
+  return map;
+}
 
-    const ignoredByName = EYES_IGNORE_PATTERNS.some((re) => re.test(relPath));
-    if (ignoredByName || EYES_BINARY_EXT.has(ext) || stat.size > EYES_MAX_FILE_BYTES) {
-      return `=== ${relPosix} ===\n[библиотека/бинарник, ${stat.size}Б — не читается; сторонние библиотеки подключай через CDN <script src>, не переписывай файлом]`;
-    }
-    const content = fs.readFileSync(abs, 'utf8');
-    return `=== ${relPosix} ===\n${content}`;
-  });
+function diffSnapshots(prev, curr) {
+  const added = [];
+  const changed = [];
+  const removed = [];
+  for (const [relPath, meta] of curr) {
+    const prevMeta = prev.get(relPath);
+    if (!prevMeta) added.push(relPath);
+    else if (prevMeta.size !== meta.size || prevMeta.mtimeMs !== meta.mtimeMs) changed.push(relPath);
+  }
+  for (const relPath of prev.keys()) {
+    if (!curr.has(relPath)) removed.push(relPath);
+  }
+  return { added, changed, removed };
+}
 
-  return blocks.join('\n\n');
+/**
+ * Дельта, не снимок (§6.1, шрам 9: v2 слал весь workspace — 34К токенов на
+ * ход). Ход 2 (второй вызов кодера на ЭТОЙ задаче) — ещё полный snapshot,
+ * ходы 3+ — только added/changed/removed относительно того, что кодер видел
+ * на прошлом ходу этой же задачи. Состояние снимка — в памяти процесса,
+ * ключ task_id; при рестарте процесса просто откатываемся к полному снимку
+ * (не баг — деградация в сторону больших, но корректных данных).
+ */
+const lastSeenSnapshot = new Map(); // task_id -> Map(relPath -> {size, mtimeMs})
+
+export function clearEyesState(taskId) {
+  lastSeenSnapshot.delete(taskId);
+}
+
+export function buildEyesForAttempt(workspaceDir, taskId, attempt) {
+  const currSnap = fs.existsSync(workspaceDir) ? snapshotMeta(workspaceDir) : new Map();
+  const prevSnap = lastSeenSnapshot.get(taskId);
+  lastSeenSnapshot.set(taskId, currSnap);
+
+  if (attempt <= 2 || !prevSnap) {
+    return buildEyes(workspaceDir);
+  }
+
+  const { added, changed, removed } = diffSnapshots(prevSnap, currSnap);
+  if (!added.length && !changed.length && !removed.length) {
+    return '(изменений в файлах с прошлого хода нет)';
+  }
+
+  const parts = [];
+  if (added.length) {
+    parts.push(`### Добавлены\n${added.map((p) => fileBlock(workspaceDir, p)).join('\n\n')}`);
+  }
+  if (changed.length) {
+    parts.push(`### Изменены\n${changed.map((p) => fileBlock(workspaceDir, p)).join('\n\n')}`);
+  }
+  if (removed.length) {
+    parts.push(`### Удалены\n${removed.map((p) => `- ${p.split(path.sep).join('/')}`).join('\n')}`);
+  }
+  return `(дельта с прошлого хода — неизменённые файлы не показаны)\n\n${parts.join('\n\n')}`;
 }
 
 function buildUserPrompt(task, eyes) {
@@ -82,7 +148,7 @@ export function isPathInsideWorkspace(workspaceDir, relPath) {
  * Возвращает {type:'files', written} | {type:'question', question} | {type:'error', error}.
  */
 export async function runCoder({ task, workspaceDir, runId }) {
-  const eyes = buildEyes(workspaceDir);
+  const eyes = buildEyesForAttempt(workspaceDir, task.id, task.attempts);
   const userText = buildUserPrompt(task, eyes);
   const messages = [
     { role: 'system', content: CODER_SYSTEM_PROMPT },

@@ -73,3 +73,7 @@ export const EYES_BINARY_EXT = new Set([
 ]);
 
 export const MOCK = process.env.MOCK === '1';
+// Синтетическая стоимость одного мок-вызова — позволяет детерминированно
+// проверять budget_usd-стоп без единого реального вызова модели (DEV_GUIDE
+// §4 DoD: «бюджет-стоп срабатывает на игрушечном лимите 0.01»), см. evals/budget.js.
+export const MOCK_CALL_COST_USD = 0.01;

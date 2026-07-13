@@ -11,7 +11,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   ROLES, MODEL_LIMITATIONS, MODEL_TIMEOUT_MS, RETRY_ROUNDS, RETRY_PAUSE_MS,
-  TIER_PRICES_USD_PER_1M, TMP_DIR, MOCK,
+  TIER_PRICES_USD_PER_1M, TMP_DIR, MOCK, MOCK_CALL_COST_USD,
 } from './config.js';
 import { logEvent } from './journal.js';
 
@@ -148,7 +148,7 @@ export async function chat(role, messages, opts = {}) {
     logEvent({
       run_id: opts.run_id, task_id: opts.task_id, type: 'usage',
       agent: opts.agent || role, duration_ms: 0, tokens_in: 0, tokens_out: 0,
-      cost_usd: 0, payload: { mock: true, role },
+      cost_usd: MOCK_CALL_COST_USD, payload: { mock: true, role },
     });
     return res;
   }
