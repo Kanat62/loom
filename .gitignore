@@ -1,0 +1,10 @@
+node_modules/
+.env
+journal.db
+journal.db-*
+skills.db
+skills.db-*
+.history/
+workspace/
+*.log
+.loom-check-*.cjs

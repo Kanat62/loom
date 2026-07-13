@@ -1,0 +1,22 @@
+{
+  "name": "loom",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LOOM — автономный инженер разработки (см. LOOM_TZ_v4.md, LOOM_DEV_GUIDE.md)",
+  "scripts": {
+    "talk": "node --env-file=.env --no-warnings talk.js",
+    "cli": "node --env-file=.env --no-warnings cli.js",
+    "resume": "node --env-file=.env --no-warnings resume.js",
+    "ask": "node --env-file=.env --no-warnings ask.js",
+    "mock": "node --env-file=.env --no-warnings mock.js",
+    "race": "node --env-file=.env --no-warnings evals/race.js",
+    "interview-eval": "node --env-file=.env --no-warnings evals/interview.js"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.3.0"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}
