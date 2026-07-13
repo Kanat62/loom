@@ -14,6 +14,7 @@ import {
 } from './journal.js';
 import { runCoder, clearEyesState } from './agents/coder.js';
 import { runTester } from './agents/tester.js';
+import { runSkillWriter } from './agents/skill.js';
 import { WORKSPACE, MAX_ATTEMPTS } from './config.js';
 
 function git(args, cwd) {
@@ -105,21 +106,25 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
 
   incrementAttempts(task.id);
   const task2 = getTask(task.id);
-  const coderResult = await runCoder({ task: task2, workspaceDir, runId });
-  addSpent(task.id, sumRunCost(runId, task.id));
 
-  if (coderResult.type === 'question') {
-    setStatus(task.id, 'blocked_needs_human', { question: coderResult.question });
-    clearEyesState(task.id);
-    return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'question' };
+  // Регрессия (§8.9, шрам 31): ТОЛЬКО повтор существующих критериев —
+  // кодер не вызывается, писать нечего, весь смысл в tester-проходе.
+  if (task2.type !== 'regression') {
+    const coderResult = await runCoder({ task: task2, workspaceDir, runId });
+    addSpent(task.id, sumRunCost(runId, task.id));
+
+    if (coderResult.type === 'question') {
+      setStatus(task.id, 'blocked_needs_human', { question: coderResult.question });
+      clearEyesState(task.id);
+      return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'question' };
+    }
+    if (coderResult.type === 'error') {
+      return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`);
+    }
+    autoCommit(workspaceDir, `loom: coder attempt ${task2.attempts} on ${task.id} (${coderResult.written.length} файлов)`);
   }
-  if (coderResult.type === 'error') {
-    return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`);
-  }
 
-  autoCommit(workspaceDir, `loom: coder attempt ${task2.attempts} on ${task.id} (${coderResult.written.length} файлов)`);
-
-  const testResult = await runTester({ task, workspaceDir });
+  const testResult = await runTester({ task: task2, workspaceDir });
   logEvent({
     run_id: runId, task_id: task.id, type: 'test_result', agent: 'tester',
     payload: { pass: testResult.pass, report: testResult.report },
@@ -129,10 +134,23 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
     setStatus(task.id, 'done', { feedback: testResult.report });
     autoCommit(workspaceDir, `loom: done ${task.id}`);
     clearEyesState(task.id);
+    await writeSkillSafely(task.id, runId);
     return { task: getTask(task.id), verdict: 'done' };
   }
 
   return handleAttemptFailure(task, runId, testResult.report);
+}
+
+/** skill_writer — механически после done (§4); сбой этой роли не должен ронять координатор. */
+async function writeSkillSafely(taskId, runId) {
+  try {
+    await runSkillWriter({ task: getTask(taskId), runId });
+  } catch (e) {
+    logEvent({
+      run_id: runId, task_id: taskId, type: 'status', agent: 'coordinator',
+      payload: { event: 'skill_writer_failed', error: e.message },
+    });
+  }
 }
 
 /**

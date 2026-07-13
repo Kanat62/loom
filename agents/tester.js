@@ -2,20 +2,42 @@
 // детерминированный код. Критерии из журнала, таймаут, отчёты до 1000
 // символов (шрам 20: 200 символов душили диагностику вложенных процессов).
 import { runCheck } from '../checkRunner.js';
+import { getTask } from '../journal.js';
 
 const REPORT_MAX_LEN = 1000;
+
+function parseCriteriaValue(parsed, raw) {
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === 'object') {
+    // Контракт регрессии (§8.9): {regression_of:[id,...]} — склейка УЖЕ
+    // СУЩЕСТВУЮЩИХ критериев done-задач, никакой новой генерации проверки
+    // (шрам 31: самописная регрессия систематически билась).
+    if (Array.isArray(parsed.regression_of)) {
+      const expanded = [];
+      for (const refId of parsed.regression_of) {
+        const refTask = getTask(refId);
+        if (!refTask) {
+          expanded.push({ cmd: `node -e "console.error('FAIL: регрессия ссылается на несуществующую задачу ${refId}'); process.exit(1)"` });
+          continue;
+        }
+        expanded.push(...parseCriteria(refTask.criteria));
+      }
+      return expanded;
+    }
+    return [parsed];
+  }
+  if (typeof parsed === 'string') return [{ cmd: parsed }];
+  return [{ cmd: raw }];
+}
 
 function parseCriteria(raw) {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && typeof parsed === 'object') return [parsed];
-    if (typeof parsed === 'string') return [{ cmd: parsed }];
+    return parseCriteriaValue(parsed, raw);
   } catch {
     return [{ cmd: raw }]; // критерий задан голой командой без JSON-обёртки
   }
-  return [];
 }
 
 function truncate(s, n) {

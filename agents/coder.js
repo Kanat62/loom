@@ -26,6 +26,12 @@ function listFilesRecursive(dir, base = dir, acc = []) {
   return acc;
 }
 
+/** Только имена файлов (без содержимого) — для router/talk, которым полные глаза не нужны. */
+export function listWorkspaceFileNames(workspaceDir) {
+  if (!fs.existsSync(workspaceDir)) return [];
+  return listFilesRecursive(workspaceDir).sort().map((p) => p.split(path.sep).join('/'));
+}
+
 function fileBlock(workspaceDir, relPath) {
   const abs = path.join(workspaceDir, relPath);
   const relPosix = relPath.split(path.sep).join('/');

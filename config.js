@@ -72,6 +72,9 @@ export const EYES_BINARY_EXT = new Set([
   '.zip', '.gz', '.pdf', '.mp4', '.mp3', '.wasm', '.db', '.sqlite',
 ]);
 
+// Предохранитель на длину интервью советника — не вечный допрос (§1, §20.16).
+export const MAX_INTERVIEW_TURNS = 6;
+
 export const MOCK = process.env.MOCK === '1';
 // Синтетическая стоимость одного мок-вызова — позволяет детерминированно
 // проверять budget_usd-стоп без единого реального вызова модели (DEV_GUIDE
