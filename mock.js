@@ -1,14 +1,15 @@
-// Детерминированные ответы всех ролей (§24 ТЗ v4). Наполняется по мере
-// появления ролей (Фаза 0 — только каркас, ветки заполняются по фазам).
-// Сценарий-эталон: калькулятор, 2 задачи, первая с нарочной ошибкой в первой
-// попытке (демонстрация цикла поймал → отчёт → починил). MOCK=1 — полный
-// прогон без единого вызова модели.
+// Детерминированные ответы всех ролей (§24 ТЗ v4). MOCK=1 — полный прогон
+// БЕЗ единого вызова модели: gateway.chat() делегирует сюда. Тестер при этом
+// остаётся настоящим (у роли tester нет LLM, §3) — checkRunner реально
+// выполняет критерии над файлами, которые записал мок-кодер, так что цикл
+// «поймал → отчёт → починил» демонстрируется по-настоящему, не имитацией.
 //
-// gateway.chat(role, messages, opts) вызывает mockChat() вместо claude-cli,
-// когда config.MOCK === true (см. gateway.js, Фаза 1).
+// Сценарий-эталон (DEV_GUIDE §11.2): калькулятор, 2 задачи, ПЕРВАЯ — с
+// нарочной ошибкой в первой попытке кодера (subtract реализован как plus),
+// тестер ловит это говорящим провалом, вторая попытка — уже верный код.
+// Вторая задача (зависит от первой) решается с первой попытки.
 import { pathToFileURL } from 'node:url';
 
-/** Возвращает [tier, callIndexForTier] — сколько раз tier этой роли уже звали. */
 const callCounters = new Map();
 
 function nextCallIndex(key) {
@@ -22,13 +23,11 @@ export function resetMockState() {
 }
 
 /**
- * mockChat(role, messages, opts) -> { text, usage } синхронно (без сети).
- * Наполняется постепенно (агенты появляются в Фазах 1, 3, 5.5).
+ * mockChat(role, messages, opts) -> текст | объект (симметрично gateway.chat).
  */
 export function mockChat(role, messages, opts = {}) {
   const idx = nextCallIndex(role);
   const userMsg = messages.find((m) => m.role === 'user')?.content || '';
-
   const handler = MOCK_HANDLERS[role];
   if (!handler) {
     throw new Error(`mock.js: нет MOCK-ветки для роли "${role}" (добавь в MOCK_HANDLERS)`);
@@ -36,25 +35,129 @@ export function mockChat(role, messages, opts = {}) {
   return handler({ idx, userMsg, messages, opts });
 }
 
-// Роли добавляются по мере реализации (Фаза 1: coder/tester не-LLM;
-// Фаза 3: advisor/router/architect/skill; Фаза 5.5: live_in).
 export const MOCK_HANDLERS = {};
 
 export function registerMockHandler(role, fn) {
   MOCK_HANDLERS[role] = fn;
 }
 
-// Точка входа `npm run mock`: полный смоук-прогон машины в MOCK-режиме.
-// Наполняется по мере готовности coordinator/gateway (с Фазы 1).
+// --- Фаза 1: coder --------------------------------------------------------
+// Задачи различаются по содержимому userMsg (заголовок задачи виден в
+// "## Задача"), не по глобальному счётчику вызовов — так сценарий не зависит
+// от порядка обработки очереди координатором.
+registerMockHandler('coder', ({ userMsg }) => {
+  const hasFeedback = /## Отчёт тестера/.test(userMsg);
+  const isCalc = /calc\.js/.test(userMsg) && !/index\.html/.test(userMsg);
+  const isPage = /index\.html/.test(userMsg);
+
+  if (isCalc) {
+    if (!hasFeedback) {
+      // Первая попытка — нарочная ошибка (шрам-демо: поймал → отчёт → починил).
+      return {
+        files: {
+          'calc.js': [
+            'module.exports = {',
+            '  add: (a, b) => a + b,',
+            '  subtract: (a, b) => a + b, // ошибка: должно быть a - b',
+            '};',
+            '',
+          ].join('\n'),
+        },
+      };
+    }
+    return {
+      files: {
+        'calc.js': [
+          'module.exports = {',
+          '  add: (a, b) => a + b,',
+          '  subtract: (a, b) => a - b,',
+          '};',
+          '',
+        ].join('\n'),
+      },
+    };
+  }
+
+  if (isPage) {
+    return {
+      files: {
+        'index.html': [
+          '<!doctype html>',
+          '<html><head><meta charset="utf-8"><title>Калькулятор</title></head>',
+          '<body>',
+          '<script src="calc.js"></script>',
+          '<div id="result">2+3=5, 5-2=3</div>',
+          '</body></html>',
+          '',
+        ].join('\n'),
+      },
+    };
+  }
+
+  throw new Error('mock.js: coder-хендлер не узнал задачу сценария калькулятора');
+});
+
+// --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
-  console.log('[mock] Фаза 0: каркас mock.js готов, ролевые ветки появятся с Фазы 1.');
-  console.log('[mock] Проверка журнала...');
+  const { MOCK } = await import('./config.js');
+  if (!MOCK) {
+    console.error('[mock] MOCK !== true — запусти через "npm run mock" (использует .env.mock).');
+    process.exit(1);
+  }
+
+  resetMockState();
+
+  const fs = await import('node:fs');
+  const { JOURNAL_DB_PATH, WORKSPACE } = await import('./config.js');
+  for (const suffix of ['', '-wal', '-shm']) {
+    const p = JOURNAL_DB_PATH + suffix;
+    if (fs.existsSync(p)) fs.rmSync(p);
+  }
+  if (fs.existsSync(WORKSPACE)) fs.rmSync(WORKSPACE, { recursive: true, force: true });
+
   const { addTask, getTask, releaseStuck } = await import('./journal.js');
-  const id = addTask({ title: 'mock smoke', spec: 'noop', criteria: '{}' });
-  const t = getTask(id);
-  if (!t || t.id !== id) throw new Error('journal smoke failed');
+  const { runCoordinatorLoop } = await import('./coordinator.js');
+
   releaseStuck();
-  console.log(`[mock] OK — задача ${id} создана и читается из журнала.`);
+
+  const calcId = addTask({
+    title: 'calc.js: экспортирует add(a,b) и subtract(a,b)',
+    spec: 'Создай calc.js в корне workspace. module.exports = { add, subtract }. add(a,b) = a+b, subtract(a,b) = a-b.',
+    criteria: JSON.stringify({
+      cmd: 'node -e "const c=require(\'./calc.js\'); const a=c.add(2,3), s=c.subtract(5,2); if(a===5 && s===3){console.log(\'PASS add=\'+a+\' subtract=\'+s)} else {console.error(\'FAIL: add(2,3)=\'+a+\' (ожидалось 5), subtract(5,2)=\'+s+\' (ожидалось 3)\'); process.exit(1)}"',
+    }),
+    role: 'coder',
+    type: 'project',
+  });
+
+  const pageId = addTask({
+    title: 'index.html: калькулятор подключает calc.js и показывает 2+3 и 5-2',
+    spec: 'Создай index.html. Подключи calc.js через <script src="calc.js"></script>. В теле должны быть числа 5 и 3 как результаты 2+3 и 5-2.',
+    criteria: JSON.stringify({
+      cmd: 'node -e "const fs=require(\'fs\'); const h=fs.readFileSync(\'index.html\',\'utf8\'); const ok = h.includes(\'calc.js\') && h.includes(\'5\') && h.includes(\'3\'); if(ok){console.log(\'PASS html содержит calc.js и результаты\')} else {console.error(\'FAIL: index.html не содержит ссылку на calc.js или результаты, len=\'+h.length); process.exit(1)}"',
+    }),
+    role: 'coder',
+    type: 'project',
+    blocked_by_task_id: calcId,
+  });
+
+  console.log(`[mock] задачи созданы: calc=${calcId}, page=${pageId}`);
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+
+  const calcTask = getTask(calcId);
+  const pageTask = getTask(pageId);
+
+  console.log(`[mock] calc: status=${calcTask.status} attempts=${calcTask.attempts}`);
+  console.log(`[mock] page: status=${pageTask.status} attempts=${pageTask.attempts}`);
+
+  const ok = calcTask.status === 'done' && calcTask.attempts === 2
+    && pageTask.status === 'done' && pageTask.attempts === 1;
+
+  if (!ok) {
+    console.error('[mock] FAIL — сценарий калькулятора не сошёлся с эталоном (calc: 2 попытки, page: 1 попытка).');
+    process.exit(1);
+  }
+  console.log('[mock] OK — цикл поймал → отчёт → починил воспроизведён, вторая задача решена с первой попытки.');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
