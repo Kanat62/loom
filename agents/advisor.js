@@ -159,3 +159,33 @@ export async function runAnalyst({ question, rootSpec, workspaceListing = [], ru
     return `Не удалось получить ответ аналитика: ${e.message}`;
   }
 }
+
+/**
+ * Отчёт консультанта (§17): advisor_analyst из root_spec + доска +
+ * engineering_defaults + источники данных. Печатается при закрытии
+ * project-дерева (talk.js, после live_in). protocol='wish' опускает блок
+ * «проблема» (см. prompts/advisor.report.md).
+ */
+export async function buildConsultantReport({
+  protocol, rootSpec, engineeringDefaults = [], problem, boardSummary, liveinSummary, runId,
+}) {
+  const parts = [
+    `## Протокол\n${protocol}`,
+    `## root_spec (сводка)\n${rootSpec || '(нет)'}`,
+    `## Принятые инженерные решения\n${engineeringDefaults.map((d) => `- ${d}`).join('\n') || '(нет)'}`,
+  ];
+  if (problem) {
+    parts.push(`## Диагностика (только для protocol=problem)\n${JSON.stringify(problem, null, 2)}`);
+  }
+  parts.push(`## Доска (задачи дерева)\n${boardSummary || '(нет данных)'}`);
+  parts.push(`## Обживание (контур 2)\n${liveinSummary || '(не проводилось)'}`);
+
+  try {
+    return await callAgent({
+      role: 'advisor', promptFile: 'advisor.report.md', userText: parts.join('\n\n'),
+      json: false, runId, agent: 'consultant_report',
+    });
+  } catch (e) {
+    return `Не удалось сформировать отчёт консультанта: ${e.message}`;
+  }
+}

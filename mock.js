@@ -53,8 +53,11 @@ registerMockHandler('coder', ({ userMsg }) => {
   const titleMatch = userMsg.match(/## Задача\n([^\n]*)/);
   const title = titleMatch ? titleMatch[1] : userMsg;
   const hasFeedback = /## Отчёт тестера/.test(userMsg);
+  const isViewportPolish = /viewport/i.test(title);
   const isCalc = /calc\.js/.test(title) && !/index\.html/.test(title);
-  const isPage = /index\.html/.test(title);
+  // isPage матчит по "index.html" в title — исключаем viewport-правку явно,
+  // иначе она перехватывается сюда (её title тоже упоминает index.html).
+  const isPage = /index\.html/.test(title) && !isViewportPolish;
 
   if (isCalc) {
     if (!hasFeedback) {
@@ -90,6 +93,23 @@ registerMockHandler('coder', ({ userMsg }) => {
         'index.html': [
           '<!doctype html>',
           '<html><head><meta charset="utf-8"><title>Калькулятор</title></head>',
+          '<body>',
+          '<script src="calc.js"></script>',
+          '<div id="result">2+3=5, 5-2=3</div>',
+          '</body></html>',
+          '',
+        ].join('\n'),
+      },
+    };
+  }
+
+  // Фаза 5.5: polish-задача от live_in — добавить meta viewport.
+  if (/viewport/i.test(title)) {
+    return {
+      files: {
+        'index.html': [
+          '<!doctype html>',
+          '<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Калькулятор</title></head>',
           '<body>',
           '<script src="calc.js"></script>',
           '<div id="result">2+3=5, 5-2=3</div>',
@@ -155,6 +175,16 @@ registerMockHandler('router', ({ userMsg }) => {
 
 // --- Фаза 3: advisor (intake wish/problem/spec + analyst) -----------------
 registerMockHandler('advisor', ({ userMsg, opts }) => {
+  if (opts.agent === 'consultant_report') {
+    // §17: печатается при закрытии project-дерева — обычный текст, не JSON.
+    return [
+      'Отчёт консультанта (MOCK).',
+      'Принятые решения: см. engineering_defaults брифа — каждое с обоснованием.',
+      'Проверено обоими контурами: код (checkRunner + регрессия) и впечатление (обживание).',
+      'Задач, требующих вашего решения, на доске не найдено.',
+      'Следующий шаг: можно расширять функциональность через tweak.',
+    ].join('\n');
+  }
   if (opts.json === false) {
     // advisor_analyst (question-протокол): обычный текст, не JSON.
     return 'Мок-аналитик: calc.js экспортирует функции add(a,b) и subtract(a,b) для сложения и вычитания.';
@@ -210,6 +240,29 @@ registerMockHandler('architect', () => ({
     },
   ],
 }));
+
+// --- Фаза 5.5: live_in (обживатель) ----------------------------------------
+// Реальная (не выдуманная) шероховатость: architect-сценарий калькулятора не
+// добавляет <meta name="viewport">, из-за чего страница не адаптируется под
+// мобильные 375px — ровно то наблюдение, которое обживание обязано ловить.
+registerMockHandler('live_in', ({ userMsg }) => {
+  // Если в собранных фактах о продукте (## Собранные факты) уже упоминается
+  // "viewport" — значит, meta-тег на месте (повторный обход после фикса),
+  // шероховатостей больше нет. Иначе — репортим её.
+  if (!/viewport/i.test(userMsg)) {
+    return {
+      rough_spots: [{
+        title: 'index.html: добавить meta viewport для мобильных 375px',
+        description: 'Добавить <meta name="viewport" content="width=device-width, initial-scale=1"> в <head>.',
+        justification: 'Собранные факты о продукте не показывают meta viewport — на мобильном 375px страница будет отображаться как уменьшенная десктопная версия, а не адаптированная.',
+        criteria: {
+          cmd: 'node -e "const fs=require(\'fs\'); const h=fs.readFileSync(\'index.html\',\'utf8\'); if(h.includes(\'viewport\')){console.log(\'PASS содержит viewport\')}else{console.error(\'FAIL: index.html не содержит meta viewport\'); process.exit(1)}"',
+        },
+      }],
+    };
+  }
+  return { rough_spots: [] };
+});
 
 // --- Фаза 3: skill_writer ---------------------------------------------------
 registerMockHandler('skill', ({ userMsg }) => {
@@ -317,6 +370,30 @@ async function runProjectPipelineScenario() {
   const skills = listSkills();
   if (!skills.length) throw new Error('project pipeline: ни одного урока не записано skill_writer-ом');
   console.log(`[mock] project pipeline OK — 2 задачи + регрессия done, ${skills.length} урок(ов) записано.`);
+
+  // --- Фаза 5.5: обживание ОДИН раз после зелёной доски + отчёт консультанта
+  const { runLivein } = await import('./agents/livein.js');
+  const { buildConsultantReport } = await import('./agents/advisor.js');
+
+  const liveinResult = await runLivein({ rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: 'default' });
+  if (!liveinResult.ok) throw new Error(`live_in: не удалось осмотреть продукт: ${liveinResult.error}`);
+  if (liveinResult.roughSpotsFound < 1) throw new Error('live_in: ожидали ≥1 реальную шероховатость (отсутствие meta viewport), нашли 0');
+  console.log(`[mock] live_in: найдено шероховатостей ${liveinResult.roughSpotsFound}, создано polish-задач ${liveinResult.taskIds.length}`);
+
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  const polishTasks = liveinResult.taskIds.map(getTask);
+  if (!polishTasks.every((t) => t.status === 'done')) {
+    throw new Error(`live_in: polish-задача(и) не закрылись: ${polishTasks.map((t) => t.status).join(', ')}`);
+  }
+  console.log('[mock] live_in OK — шероховатость найдена и закрыта tweak/polish-циклом.');
+
+  const report = await buildConsultantReport({
+    protocol: 'wish', rootSpec: brief.summary, engineeringDefaults: brief.engineering_defaults,
+    problem: brief.problem, boardSummary: `${allIds.length + polishTasks.length} задач в дереве`,
+    liveinSummary: `найдено и закрыто: ${liveinResult.roughSpotsFound}`, runId,
+  });
+  if (typeof report !== 'string' || !report.trim()) throw new Error('consultant report: пустой отчёт');
+  console.log(`[mock] consultant report OK (${report.length} симв.):\n${report.split('\n').map((l) => `    ${l}`).join('\n')}`);
 }
 
 // --- Сценарий В (Фаза 3): tweak — router сам пишет критерий ---------------

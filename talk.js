@@ -7,10 +7,12 @@ import path from 'node:path';
 import { question, closeInput, sanitizeLine } from './io.js';
 import {
   isGarbageInput, startIntake, continueIntake, reviseDecisions, buildBrief, runAnalyst,
+  buildConsultantReport,
 } from './agents/advisor.js';
 import { routeRequest } from './agents/router.js';
 import { runArchitect } from './agents/architect.js';
 import { listWorkspaceFileNames } from './agents/coder.js';
+import { runLivein } from './agents/livein.js';
 import { runCoordinatorLoop } from './coordinator.js';
 import {
   addTask, getTask, listTasks, releaseStuck, newRunId, setRootSpec, getRootSpec,
@@ -29,6 +31,14 @@ function backupWorkspaceHistory(label) {
   } catch (e) {
     console.error(`[talk] .history-бэкап не удался (продолжаю без него): ${e.message}`);
   }
+}
+
+function boardSummaryText(taskIds) {
+  return taskIds.map((id) => {
+    const t = getTask(id);
+    if (!t) return `- ${id}: (не найдена)`;
+    return `- [${t.type}] "${t.title}" — ${t.status} (попыток: ${t.attempts})${t.feedback ? ` — ${t.feedback.slice(0, 200)}` : ''}`;
+  }).join('\n');
 }
 
 function printStatus() {
@@ -80,6 +90,41 @@ async function runProjectFlow(protocol, initialText, runId) {
 
   await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
   printStatus();
+
+  const treeIds = [...architectResult.taskIds, architectResult.regressionId];
+  const allDone = treeIds.every((id) => getTask(id)?.status === 'done');
+  if (!allDone) {
+    console.log('\nДерево не полностью зелёное — обживание и отчёт консультанта пропущены (см. /status, /resume).');
+    return;
+  }
+
+  // Обживание (§9, Фаза 5.5) — ОДИН цикл на сдачу, только после зелёной доски.
+  console.log('\n[live_in] обживаю продукт как первый пользователь...');
+  const liveinResult = await runLivein({
+    rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: 'default',
+  });
+
+  let liveinSummary;
+  if (!liveinResult.ok) {
+    liveinSummary = `не удалось провести обживание: ${liveinResult.error}`;
+    console.log(`\n[live_in] ${liveinSummary}`);
+  } else if (liveinResult.roughSpotsFound === 0) {
+    liveinSummary = 'шероховатостей не найдено — обживание прошло без замечаний.';
+    console.log(`\n[live_in] ${liveinSummary}`);
+  } else {
+    console.log(`\n[live_in] найдено шероховатостей: ${liveinResult.roughSpotsFound}, создано polish-задач: ${liveinResult.taskIds.length}`);
+    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+    liveinSummary = `найдено и обработано шероховатостей: ${liveinResult.roughSpotsFound}\n${boardSummaryText(liveinResult.taskIds)}`;
+    printStatus();
+  }
+
+  const allTreeIds = [...treeIds, ...(liveinResult.taskIds || [])];
+  console.log('\n--- Отчёт консультанта ---');
+  const report = await buildConsultantReport({
+    protocol, rootSpec: brief.summary, engineeringDefaults: brief.engineering_defaults,
+    problem: brief.problem, boardSummary: boardSummaryText(allTreeIds), liveinSummary, runId,
+  });
+  console.log(report);
 }
 
 async function runTweakFlow(text, criteria, runId) {
