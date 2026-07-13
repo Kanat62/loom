@@ -1,0 +1,14 @@
+{
+  "//": "Заготовка tsc-контрактов (DEV_GUIDE §6): level-0 (tsc --noEmit) включается в Фазе 6 вместе с touches_functions/entity-level claiming. Пока не используется координатором.",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": false
+  },
+  "include": ["workspace/**/*.js", "*.js"],
+  "exclude": ["node_modules", "workspace/node_modules"]
+}

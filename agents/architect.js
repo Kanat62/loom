@@ -69,7 +69,9 @@ async function regenerateCriteria({ title, spec, oldCriteria, runId }) {
  * runArchitect({brief, workspaceDir, workspaceListing, runId, projectId}) →
  * {ok, taskIds, regressionId, packages, installOk, precheckLog} | {ok:false, error}
  */
-export async function runArchitect({ brief, workspaceDir, workspaceListing = [], runId, projectId = 'default' }) {
+export async function runArchitect({
+  brief, workspaceDir, workspaceListing = [], runId, projectId = 'default', sandbox = 'local',
+}) {
   const userText = buildArchitectPrompt(brief, workspaceListing);
   let raw;
   try {
@@ -94,7 +96,7 @@ export async function runArchitect({ brief, workspaceDir, workspaceListing = [],
   for (const t of plan.tasks) {
     let criteria = t.criteria;
     // Предпроверка (шрам 19): тихо (pipe, 5с) прогоняем критерий ДО кодера.
-    const pre = await precheck(criteria, workspaceDir);
+    const pre = await precheck(criteria, workspaceDir, { sandbox });
     if (pre.pass) {
       const regenerated = await regenerateCriteria({ title: t.title, spec: t.spec, oldCriteria: criteria, runId });
       if (regenerated) criteria = regenerated;

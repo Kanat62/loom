@@ -118,6 +118,12 @@ registerMockHandler('coder', ({ userMsg }) => {
     };
   }
 
+  // Фаза 4 DoD: попытка записи вне workspace блокируется замком пути и
+  // логируется — мок-кодер намеренно ведёт себя как «злой»/сломанный агент.
+  if (/ТЕСТ_ПУТЬ_НАРУШЕНИЕ/.test(title)) {
+    return { files: { '../evil.js': "console.log('escaped workspace');\n" } };
+  }
+
   // Задача вне сценария калькулятора (например, evals/budget.js) — детерминированная
   // заглушка-файл, чтобы другие MOCK-прогоны могли переиспользовать этот хендлер,
   // не расширяя сам сценарий-эталон.
@@ -361,6 +367,42 @@ async function runQuestionScenario() {
   console.log(`[mock] question OK — route=question, ответ аналитика получен ("${answer.slice(0, 50)}...").`);
 }
 
+// --- Сценарий Д (Фаза 4): замок пути — запись вне workspace блокируется ---
+// --- и логируется отдельным событием (§12.1) ------------------------------
+async function runPathLockScenario() {
+  const { addTask, getTask, newRunId, listEvents } = await import('./journal.js');
+  const { runCoordinatorLoop } = await import('./coordinator.js');
+  const { WORKSPACE } = await import('./config.js');
+
+  const runId = newRunId();
+  const title = 'ТЕСТ_ПУТЬ_НАРУШЕНИЕ: попытка выйти из workspace';
+  const id = addTask({
+    title, spec: title, criteria: JSON.stringify({ cmd: 'node -e "console.log(\'PASS\')"' }), role: 'coder', type: 'project', budget_usd: 100,
+  });
+
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+
+  const task = getTask(id);
+  console.log(`[mock] path-lock: status=${task.status} attempts=${task.attempts}`);
+  if (task.status !== 'blocked_needs_human') {
+    throw new Error(`path-lock: ожидали blocked_needs_human (кодер только пытался выйти из workspace), получили ${task.status}`);
+  }
+
+  const events = listEvents({ task_id: id });
+  const blockedEvent = events.find((e) => {
+    try { return JSON.parse(e.payload || '{}').event === 'path_lock_blocked'; } catch { return false; }
+  });
+  if (!blockedEvent) throw new Error('path-lock: событие path_lock_blocked не найдено в journal (нарушение НЕ залогировано)');
+
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const escapedPath = path.join(WORKSPACE, '..', 'evil.js');
+  if (fs.existsSync(escapedPath)) {
+    throw new Error(`path-lock: файл вне workspace всё-таки материализовался на диске: ${escapedPath}`);
+  }
+  console.log('[mock] path-lock OK — запись вне workspace заблокирована и залогирована событием path_lock_blocked.');
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -389,6 +431,7 @@ async function main() {
     ['project pipeline: wish → router/advisor/architect/coordinator/skill (Фаза 3)', runProjectPipelineScenario],
     ['tweak: router пишет критерий сам (Фаза 3)', runTweakScenario],
     ['question: read-only аналитик, без задач (Фаза 3)', runQuestionScenario],
+    ['path-lock: запись вне workspace блокируется и логируется (Фаза 4)', runPathLockScenario],
   ];
 
   let failed = false;

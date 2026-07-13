@@ -50,7 +50,7 @@ function truncate(s, n) {
  * report — не единственная истина (§9), но должен быть читаем LLM-кодером:
  * какое условие не выполнено, с фактическими значениями.
  */
-export async function runTester({ task, workspaceDir }) {
+export async function runTester({ task, workspaceDir, sandbox = 'local' }) {
   const criteria = parseCriteria(task.criteria);
   if (!criteria.length) {
     return { pass: false, report: 'FAIL: у задачи нет критерия приёмки (criteria пуст или не распарсился)' };
@@ -61,7 +61,7 @@ export async function runTester({ task, workspaceDir }) {
   for (let i = 0; i < criteria.length; i++) {
     const c = criteria[i];
     const timeout = (typeof c === 'object' && c.timeout) || 10000;
-    const res = await runCheck(c, { cwd: workspaceDir, timeout });
+    const res = await runCheck(c, { cwd: workspaceDir, timeout, sandbox });
     allPass = allPass && res.pass;
     const status = res.pass ? 'PASS' : 'FAIL';
     const out = truncate((res.output || '(пустой вывод)').trim(), 300);

@@ -15,7 +15,8 @@ import {
 import { runCoder, clearEyesState } from './agents/coder.js';
 import { runTester } from './agents/tester.js';
 import { runSkillWriter } from './agents/skill.js';
-import { WORKSPACE, MAX_ATTEMPTS } from './config.js';
+import { isDockerAvailable, buildWorkspaceImage } from './docker.js';
+import { WORKSPACE, MAX_ATTEMPTS, ROOT } from './config.js';
 
 function git(args, cwd) {
   try {
@@ -24,6 +25,54 @@ function git(args, cwd) {
   } catch {
     return false; // "nothing to commit" и подобные — не аварийная ситуация
   }
+}
+
+// gitGuard (шрам 5, §12.4): физическая защита репозитория самого LOOM от
+// stray-веток агентов. Все git-операции агентского пути и так строго
+// scoped к workspaceDir (см. git()/autoCommit() выше — cwd передаётся явно
+// на каждый вызов, никогда не наследуется от process.cwd()); это —
+// дополнительный pre-flight, который громко останавливает координатор, если
+// репозиторий LOOM САМ неожиданно оказался не на основной ветке.
+const LOOM_MAIN_BRANCHES = new Set(['main', 'master']);
+
+export function gitGuard() {
+  try {
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: ROOT, stdio: 'pipe' })
+      .toString().trim();
+    if (!LOOM_MAIN_BRANCHES.has(branch)) {
+      return { ok: false, branch, message: `gitGuard: репозиторий LOOM на неожиданной ветке "${branch}" (ожидали main/master) — возможна stray-ветка агента (шрам 5)` };
+    }
+    return { ok: true, branch };
+  } catch {
+    // Не git-репозиторий или git недоступен (например, тесты во временном
+    // каталоге) — не блокируем, просто нечего защищать.
+    return { ok: true, branch: null, skipped: true };
+  }
+}
+
+let dockerSandboxState = { ready: false, checkedForDir: null };
+
+/**
+ * Собирает (или переиспользует кэш) образ комнаты кодера, если Docker-демон
+ * доступен (§12 ТЗ, Фаза 4). Пересборка — раз на вход в runCoordinatorLoop
+ * для данного workspace (упрощение: architect может добавить пакеты
+ * ПОСРЕДИ дерева — тогда статус «нужен пакет» потребует ручного /resume,
+ * полноценный авто-триггер на изменение package.json — за рамками Фазы 4).
+ */
+function ensureDockerSandbox(workspaceDir) {
+  if (dockerSandboxState.checkedForDir === workspaceDir) return dockerSandboxState.ready;
+  if (!isDockerAvailable()) {
+    dockerSandboxState = { ready: false, checkedForDir: workspaceDir };
+    return false;
+  }
+  const result = buildWorkspaceImage(workspaceDir);
+  dockerSandboxState = { ready: result.ok, checkedForDir: workspaceDir };
+  if (!result.ok) {
+    console.error(`[coordinator] Docker доступен, но сборка образа не удалась — исполнение локально: ${result.error}`);
+  } else {
+    console.log('[coordinator] Docker-песочница активна для этого workspace (--network none, лимиты).');
+  }
+  return dockerSandboxState.ready;
 }
 
 /**
@@ -119,12 +168,21 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
       return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'question' };
     }
     if (coderResult.type === 'error') {
+      // Замок пути (§12.1) — попытка записи вне workspace: отдельное
+      // событие для аудита SQL-запросом (§14), не только текст в feedback.
+      if (/замком пути/.test(coderResult.error)) {
+        logEvent({
+          run_id: runId, task_id: task.id, type: 'status', agent: 'coordinator',
+          payload: { event: 'path_lock_blocked', error: coderResult.error },
+        });
+      }
       return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`);
     }
     autoCommit(workspaceDir, `loom: coder attempt ${task2.attempts} on ${task.id} (${coderResult.written.length} файлов)`);
   }
 
-  const testResult = await runTester({ task: task2, workspaceDir });
+  const sandbox = ensureDockerSandbox(workspaceDir) ? 'docker' : 'local';
+  const testResult = await runTester({ task: task2, workspaceDir, sandbox });
   logEvent({
     run_id: runId, task_id: task.id, type: 'test_result', agent: 'tester',
     payload: { pass: testResult.pass, report: testResult.report },
@@ -154,11 +212,15 @@ async function writeSkillSafely(taskId, runId) {
 }
 
 /**
- * Цикл координатора: releaseStuck() на КАЖДОМ входе (шрам 25 — задачи
- * навечно в claimed после смерти процесса), затем обработка задач роли role
- * до опустошения очереди или maxIterations.
+ * Цикл координатора: gitGuard pre-flight (шрам 5) → releaseStuck() на
+ * КАЖДОМ входе (шрам 25 — задачи навечно в claimed после смерти процесса),
+ * затем обработка задач роли role до опустошения очереди или maxIterations.
  */
 export async function runCoordinatorLoop({ role = 'coder', workspaceDir = WORKSPACE, maxIterations = Infinity } = {}) {
+  const guard = gitGuard();
+  if (!guard.ok) {
+    throw new Error(guard.message);
+  }
   releaseStuck();
   const results = [];
   let iterations = 0;
