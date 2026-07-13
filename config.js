@@ -56,13 +56,18 @@ export const MAX_RETRIES_SDK = 0;        // retry только в шлюзе (ш
 export const DEFAULT_TASK_BUDGET_USD = 2.0;
 export const DEFAULT_PROJECT_BUDGET_USD = 20.0;
 
-export const WORKSPACE = path.join(ROOT, 'workspace');
+// MOCK и реальный режим НИКОГДА не должны делить состояние (реальный баг,
+// найден на первом живом прогоне пользователя: npm run mock оставлял свои
+// тестовые задачи И тестовые файлы workspace, которые затем подмешивались
+// в npm run talk) — раздельные journal/skills/workspace вместо общих.
+const MOCK_FLAG = process.env.MOCK === '1';
+export const WORKSPACE = path.join(ROOT, MOCK_FLAG ? 'workspace.mock' : 'workspace');
 export const PROMPTS_DIR = path.join(ROOT, 'prompts');
 export const TMP_DIR = path.join(ROOT, '.loom-tmp');
 export const HISTORY_DIR = path.join(ROOT, '.history');
 
-export const JOURNAL_DB_PATH = path.join(ROOT, 'journal.db');
-export const SKILLS_DB_PATH = path.join(ROOT, 'skills.db');
+export const JOURNAL_DB_PATH = path.join(ROOT, MOCK_FLAG ? 'journal.mock.db' : 'journal.db');
+export const SKILLS_DB_PATH = path.join(ROOT, MOCK_FLAG ? 'skills.mock.db' : 'skills.db');
 
 // Фильтр мусора в глазах кодера (шрам 9, шрам 30).
 export const EYES_MAX_FILE_BYTES = 50 * 1024;

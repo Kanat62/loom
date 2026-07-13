@@ -145,11 +145,19 @@ export function buildBrief({ protocol, initialText, step }) {
 /**
  * advisor_analyst (протокол question, §3): read-only, без интервью, без
  * задач. Один вызов, обычный текстовый ответ (не JSON).
+ *
+ * Реальный баг с первого живого прогона: раньше сюда передавался только
+ * СПИСОК ИМЁН файлов — аналитик физически не мог ответить на «почему X не
+ * работает», только на вопросы уровня «что тут вообще есть». Теперь —
+ * полное содержимое (тот же фильтр мусора, что у глаз кодера), просто
+ * read-only: аналитик его не редактирует, только читает.
  */
-export async function runAnalyst({ question, rootSpec, workspaceListing = [], runId }) {
+export async function runAnalyst({ question, rootSpec, workspaceDir, runId }) {
+  const { buildEyes } = await import('./coder.js');
+  const eyes = workspaceDir ? buildEyes(workspaceDir) : '(workspace не передан)';
   const parts = [`## Вопрос клиента\n${question}`];
   parts.push(`## root_spec проекта\n${rootSpec || '(проект ещё не заведён — root_spec отсутствует)'}`);
-  parts.push(`## Файлы продукта\n${workspaceListing.length ? workspaceListing.join('\n') : '(workspace пуст)'}`);
+  parts.push(`## Файлы продукта (полное содержимое, read-only)\n${eyes}`);
   try {
     return await callAgent({
       role: 'advisor', promptFile: 'advisor.analyst.md', userText: parts.join('\n\n'),

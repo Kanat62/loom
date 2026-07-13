@@ -174,7 +174,7 @@ async function handleLine(rawLine) {
   if (routed.route === 'question') {
     const rootSpec = getRootSpec('default');
     const answer = await runAnalyst({
-      question: line, rootSpec: rootSpec?.spec, workspaceListing, runId,
+      question: line, rootSpec: rootSpec?.spec, workspaceDir: WORKSPACE, runId,
     });
     console.log(`\n${answer}`);
     return;

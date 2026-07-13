@@ -2,9 +2,14 @@ node_modules/
 .env
 journal.db
 journal.db-*
+journal.mock.db
+journal.mock.db-*
 skills.db
 skills.db-*
+skills.mock.db
+skills.mock.db-*
 .history/
 workspace/
+workspace.mock/
 *.log
 .loom-check-*.cjs

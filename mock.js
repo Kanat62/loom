@@ -438,7 +438,7 @@ async function runQuestionScenario() {
 
   const rootSpec = getRootSpec('default');
   const answer = await runAnalyst({
-    question: text, rootSpec: rootSpec?.spec, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId,
+    question: text, rootSpec: rootSpec?.spec, workspaceDir: WORKSPACE, runId,
   });
   if (typeof answer !== 'string' || !answer.trim()) throw new Error('question: пустой ответ аналитика');
   console.log(`[mock] question OK — route=question, ответ аналитика получен ("${answer.slice(0, 50)}...").`);

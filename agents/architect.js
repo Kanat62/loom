@@ -36,15 +36,17 @@ function validatePlan(plan) {
   return { packages, tasks };
 }
 
+const NPM_INSTALL_TIMEOUT_MS = 10 * 60_000; // пакеты вроде playwright тянут браузерный бинарник — даём запас
+
 function npmInstall(workspaceDir, packages) {
   if (!packages.length) return { ok: true, output: '(пакетов не требуется)' };
   try {
     const out = execFileSync('npm', ['install', '--no-audit', '--no-fund', ...packages], {
-      cwd: workspaceDir, stdio: 'pipe',
+      cwd: workspaceDir, stdio: 'pipe', timeout: NPM_INSTALL_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024,
     });
     return { ok: true, output: out.toString().slice(0, 500) };
   } catch (e) {
-    return { ok: false, output: (e.stdout ? e.stdout.toString() : e.message).slice(0, 500) };
+    return { ok: false, output: (e.stdout ? e.stdout.toString() : e.message).slice(0, 1000) };
   }
 }
 
@@ -88,6 +90,17 @@ export async function runArchitect({
   }
 
   const install = npmInstall(workspaceDir, plan.packages);
+  // Реальный баг с первого живого прогона: раньше install-ошибка тихо
+  // игнорировалась — задачи создавались с критериями на пакет, которого
+  // физически нет, и всё дерево гарантированно упиралось в
+  // "Cannot find module" на КАЖДОЙ из 4 попыток. Теперь — честный останов
+  // ДО создания задач (§12.2: "нужен пакет → статус «нужен пакет»").
+  if (!install.ok) {
+    return {
+      ok: false,
+      error: `architect: npm install пакетов [${plan.packages.join(', ')}] не удался — задачи не созданы: ${install.output}`,
+    };
+  }
 
   const createdIds = [];
   const titleToId = new Map();

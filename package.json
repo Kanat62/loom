@@ -10,7 +10,7 @@
     "resume": "node --env-file=.env --no-warnings resume.js",
     "ask": "node --env-file=.env --no-warnings ask.js",
     "mock": "node --env-file=.env --env-file=.env.mock --no-warnings mock.js",
-    "race": "node --env-file=.env --no-warnings evals/race.js",
+    "race": "node --env-file=.env --env-file=.env.mock --no-warnings evals/race.js",
     "budget-eval": "node --env-file=.env --env-file=.env.mock --no-warnings evals/budget.js",
     "interview-eval": "node --env-file=.env --no-warnings evals/interview.js",
     "interview-eval:mock": "node --env-file=.env --env-file=.env.mock --no-warnings evals/interview.js"
