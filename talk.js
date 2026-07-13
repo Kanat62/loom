@@ -54,32 +54,66 @@ function printStatus() {
   }
 }
 
+/**
+ * root_spec — стабильный якорь исходной цели (§4/§15, лекарство от goal
+ * drift). Реальный баг с первого живого прогона: каждый новый wish/problem/
+ * spec на том же проекте ПЕРЕЗАПИСЫВАЛ root_spec целиком — второй запрос
+ * («добавь фильтр и поиск») стирал engineering_defaults первого запроса
+ * (какие поля на карточке и т.п.), из-за чего советник во второй раз не мог
+ * их унаследовать при всём желании. Теперь первый заход создаёт root_spec,
+ * последующие ДОПОЛНЯЮТ его (объединение engineering_defaults, summary
+ * растёт припиской, не заменяется).
+ */
+function mergeRootSpec(existing, newSummary, newDefaults) {
+  const existingDefaults = existing?.engineering_defaults ? JSON.parse(existing.engineering_defaults) : [];
+  const mergedDefaults = [...existingDefaults];
+  for (const d of newDefaults) if (!mergedDefaults.includes(d)) mergedDefaults.push(d);
+  const spec = existing?.spec ? `${existing.spec}\n\n[Дополнение] ${newSummary}` : newSummary;
+  return { spec, engineeringDefaults: mergedDefaults };
+}
+
 async function runProjectFlow(protocol, initialText, runId) {
-  let { history, step } = await startIntake({ protocol, initialText, runId });
+  const existingRootSpec = getRootSpec('default');
+  const existingDefaults = existingRootSpec?.engineering_defaults
+    ? JSON.parse(existingRootSpec.engineering_defaults) : [];
+
+  let { history, step } = await startIntake({
+    protocol, initialText, runId, rootSpec: existingRootSpec?.spec, engineeringDefaults: existingDefaults,
+  });
   let turnCount = 1;
   while (step.type === 'ask') {
     const reply = sanitizeLine(await question(`\n${step.question}\n> `));
     turnCount++;
     // eslint-disable-next-line no-await-in-loop
-    ({ history, step } = await continueIntake({ protocol, history, clientReply: reply, runId, turnCount }));
+    ({ history, step } = await continueIntake({
+      protocol, history, clientReply: reply, runId, turnCount,
+      rootSpec: existingRootSpec?.spec, engineeringDefaults: existingDefaults,
+    }));
   }
 
   console.log('\nПринял инженерные решения:');
   for (const d of step.engineeringDefaults) console.log(`  - ${d}`);
   const confirmation = sanitizeLine(await question('\n(Enter — согласие, или впишите правку)\n> '));
   if (confirmation) {
-    ({ history, step } = await reviseDecisions({ protocol, history, correctionText: confirmation, runId }));
+    ({ history, step } = await reviseDecisions({
+      protocol, history, correctionText: confirmation, runId,
+      rootSpec: existingRootSpec?.spec, engineeringDefaults: existingDefaults,
+    }));
     console.log('\nОбновлённые решения:');
     for (const d of step.engineeringDefaults) console.log(`  - ${d}`);
   }
 
   const brief = buildBrief({ protocol, initialText, step });
-  setRootSpec('default', brief.summary, brief.engineering_defaults, protocol);
+  const merged = mergeRootSpec(existingRootSpec, brief.summary, brief.engineering_defaults);
+  setRootSpec('default', merged.spec, merged.engineeringDefaults, protocol);
   backupWorkspaceHistory(protocol);
 
+  // Архитектор получает ПОЛНУЮ (объединённую) картину продукта, не только
+  // новый инкремент — иначе он тоже забудет более ранние решения.
+  const fullBrief = { ...brief, summary: merged.spec, engineering_defaults: merged.engineeringDefaults };
   const workspaceListing = listWorkspaceFileNames(WORKSPACE);
   const architectResult = await runArchitect({
-    brief, workspaceDir: WORKSPACE, workspaceListing, runId, projectId: 'default',
+    brief: fullBrief, workspaceDir: WORKSPACE, workspaceListing, runId, projectId: 'default',
   });
   if (!architectResult.ok) {
     console.log(`\nАрхитектор не смог построить план: ${architectResult.error}`);
@@ -101,7 +135,7 @@ async function runProjectFlow(protocol, initialText, runId) {
   // Обживание (§9, Фаза 5.5) — ОДИН цикл на сдачу, только после зелёной доски.
   console.log('\n[live_in] обживаю продукт как первый пользователь...');
   const liveinResult = await runLivein({
-    rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: 'default',
+    rootSpec: merged.spec, workspaceDir: WORKSPACE, runId, projectId: 'default',
   });
 
   let liveinSummary;
@@ -121,7 +155,7 @@ async function runProjectFlow(protocol, initialText, runId) {
   const allTreeIds = [...treeIds, ...(liveinResult.taskIds || [])];
   console.log('\n--- Отчёт консультанта ---');
   const report = await buildConsultantReport({
-    protocol, rootSpec: brief.summary, engineeringDefaults: brief.engineering_defaults,
+    protocol, rootSpec: merged.spec, engineeringDefaults: merged.engineeringDefaults,
     problem: brief.problem, boardSummary: boardSummaryText(allTreeIds), liveinSummary, runId,
   });
   console.log(report);

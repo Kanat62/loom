@@ -53,16 +53,34 @@ function renderHistory(history) {
   }).join('\n');
 }
 
-function buildUserText(protocol, history) {
-  return [
-    `## Протокол\n${protocol}`,
-    `## История диалога\n${renderHistory(history)}`,
-    '## Задача на этот ход\nЕсли информации достаточно — верни {"ready":true,...}. Иначе верни ровно один уточняющий вопрос {"ask":"..."} строго по правилам протокола.',
-  ].join('\n\n');
+function buildUserText(protocol, history, existingContext) {
+  const parts = [`## Протокол\n${protocol}`];
+
+  // Реальный баг с первого живого прогона: советник спрашивал то, что УЖЕ
+  // решено в существующем продукте (например, какие поля на карточке —
+  // хотя они уже определены в engineering_defaults первого захода). Без
+  // контекста существующего проекта советник работает вслепую даже когда
+  // клиент явно расширяет то, что уже есть.
+  const hasExisting = existingContext && (existingContext.rootSpec || (existingContext.engineeringDefaults || []).length);
+  if (hasExisting) {
+    parts.push([
+      '## Контекст УЖЕ существующего продукта',
+      'Если запрос клиента — расширение/правка существующего продукта (а не проект с нуля),',
+      'ты ОБЯЗАН унаследовать эти решения и НЕ переспрашивать то, что уже здесь решено.',
+      `Сводка продукта: ${existingContext.rootSpec || '(нет)'}`,
+      `Ранее принятые инженерные решения:\n${(existingContext.engineeringDefaults || []).map((d) => `- ${d}`).join('\n') || '(нет)'}`,
+    ].join('\n'));
+  }
+
+  parts.push(`## История диалога\n${renderHistory(history)}`);
+  parts.push('## Задача на этот ход\nЕсли информации достаточно — верни {"ready":true,...}. Иначе верни ровно один уточняющий вопрос {"ask":"..."} строго по правилам протокола.');
+  return parts.join('\n\n');
 }
 
-async function runAdvisorStep({ protocol, history, runId, retried = false }) {
-  const userText = buildUserText(protocol, history);
+async function runAdvisorStep({
+  protocol, history, runId, retried = false, existingContext,
+}) {
+  const userText = buildUserText(protocol, history, existingContext);
   let result;
   try {
     result = await callAgent({
@@ -79,7 +97,7 @@ async function runAdvisorStep({ protocol, history, runId, retried = false }) {
           role: 'system_note',
           text: 'Предыдущий вопрос содержал техническую деталь — клиенту такое спрашивать нельзя. Реши сам, либо задай вопрос только о желаемом результате.',
         }];
-        return runAdvisorStep({ protocol, history: nudged, runId, retried: true });
+        return runAdvisorStep({ protocol, history: nudged, runId, retried: true, existingContext });
       }
       // Код-уровневый guard побеждает модель безусловно (§1: "на двух уровнях").
       return { type: 'ask', question: SAFE_FALLBACK_QUESTION, forcedFallback: true };
@@ -109,26 +127,35 @@ async function forceFinalize(protocol, history) {
   };
 }
 
-export async function startIntake({ protocol, initialText, runId }) {
+export async function startIntake({
+  protocol, initialText, runId, rootSpec, engineeringDefaults,
+}) {
+  const existingContext = { rootSpec, engineeringDefaults };
   const history = [{ role: 'client', text: initialText }];
-  const step = await runAdvisorStep({ protocol, history, runId });
+  const step = await runAdvisorStep({ protocol, history, runId, existingContext });
   if (step.type === 'ask') history.push({ role: 'advisor_ask', text: step.question });
   return { history, step };
 }
 
-export async function continueIntake({ protocol, history, clientReply, runId, turnCount = 1 }) {
+export async function continueIntake({
+  protocol, history, clientReply, runId, turnCount = 1, rootSpec, engineeringDefaults,
+}) {
   if (turnCount >= MAX_INTERVIEW_TURNS) {
     return { history, step: await forceFinalize(protocol, history) };
   }
+  const existingContext = { rootSpec, engineeringDefaults };
   const newHistory = [...history, { role: 'client', text: clientReply }];
-  const step = await runAdvisorStep({ protocol, history: newHistory, runId });
+  const step = await runAdvisorStep({ protocol, history: newHistory, runId, existingContext });
   if (step.type === 'ask') newHistory.push({ role: 'advisor_ask', text: step.question });
   return { history: newHistory, step };
 }
 
-export async function reviseDecisions({ protocol, history, correctionText, runId }) {
+export async function reviseDecisions({
+  protocol, history, correctionText, runId, rootSpec, engineeringDefaults,
+}) {
+  const existingContext = { rootSpec, engineeringDefaults };
   const newHistory = [...history, { role: 'client_correction', text: correctionText }];
-  const step = await runAdvisorStep({ protocol, history: newHistory, runId });
+  const step = await runAdvisorStep({ protocol, history: newHistory, runId, existingContext });
   return { history: newHistory, step };
 }
 
