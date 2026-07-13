@@ -1,0 +1,9 @@
+{
+  "title": "sum.js: экспортирует sum(a,b)",
+  "spec": "Создай sum.js в корне workspace. module.exports = { sum }; sum(a,b) возвращает a+b.",
+  "criteria": {
+    "cmd": "node -e \"const s=require('./sum.js').sum(2,3); if(s===5){console.log('PASS sum(2,3)='+s)}else{console.error('FAIL: sum(2,3)='+s+' (ожидалось 5)'); process.exit(1)}\""
+  },
+  "role": "coder",
+  "type": "project"
+}
