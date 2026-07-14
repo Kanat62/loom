@@ -1,7 +1,7 @@
 // agents/router.js — один вызов лёгкой модели: {route, reason, criteria?}
 // (§3, §1 ТЗ v4). Парсинг безопасный: ошибка → route='project' (ошибка в
 // сторону завышения безопасна — полный цикл вместо мусорной точечной правки).
-import { callAgent } from '../engine.js';
+import { callAgent } from '../core/engine.js';
 
 const KNOWN_ROUTES = new Set(['question', 'tweak', 'wish', 'problem', 'spec']);
 

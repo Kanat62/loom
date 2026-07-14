@@ -2,8 +2,8 @@
 // координатором после каждой завершённой (done) задачи. Фильтр галлюцинаций
 // + SKIP (шрам 24) — реализован в skills.js:hallucinationGuard, здесь только
 // формируем запрос модели и передаём результат в writeSkill().
-import { callAgent } from '../engine.js';
-import { writeSkill } from '../skills.js';
+import { callAgent } from '../core/engine.js';
+import { writeSkill } from '../core/skills.js';
 
 function buildSkillPrompt(task) {
   let files = [];

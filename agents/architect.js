@@ -3,9 +3,9 @@
 // логом (шрам 19); контракт регрессии §8.9 (склейка id, не новая проверка,
 // шрам 31).
 import { execFileSync } from 'node:child_process';
-import { callAgent } from '../engine.js';
-import { precheck } from '../checkRunner.js';
-import { addTask } from '../journal.js';
+import { callAgent } from '../core/engine.js';
+import { precheck } from '../core/checkRunner.js';
+import { addTask } from '../core/journal.js';
 
 function buildArchitectPrompt(brief, workspaceListing) {
   const parts = [

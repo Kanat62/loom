@@ -3,9 +3,9 @@
 // с --env-file=.env.mock, как npm run mock), чтобы не тратить реальные
 // вызовы моделей — стоимость мок-вызова синтетическая (config.MOCK_CALL_COST_USD).
 import fs from 'node:fs';
-import { JOURNAL_DB_PATH, WORKSPACE, MOCK, MOCK_CALL_COST_USD } from '../config.js';
-import { addTask, getTask, releaseStuck } from '../journal.js';
-import { runCoordinatorLoop } from '../coordinator.js';
+import { JOURNAL_DB_PATH, WORKSPACE, MOCK, MOCK_CALL_COST_USD } from '../core/config.js';
+import { addTask, getTask, releaseStuck } from '../core/journal.js';
+import { runCoordinatorLoop } from '../core/coordinator.js';
 
 async function main() {
   if (!MOCK) {

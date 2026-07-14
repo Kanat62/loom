@@ -4,8 +4,8 @@
 // код-уровневый regex, что и agents/advisor.js — детерминированно и без
 // единого реального вызова (см. mock.js: MOCK_HANDLERS.cheap).
 import { startIntake } from '../agents/advisor.js';
-import { chat } from '../gateway.js';
-import { newRunId, releaseStuck } from '../journal.js';
+import { chat } from '../core/gateway.js';
+import { newRunId, releaseStuck } from '../core/journal.js';
 
 const WISHES = [
   { protocol: 'wish', text: 'Хочу одностраничник кофейни с меню и контактами.' },

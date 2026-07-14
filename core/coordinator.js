@@ -12,9 +12,9 @@ import {
   claimNext, setStatus, addSpent, isOverBudget, releaseStuck, newRunId,
   logEvent, listEvents, getTask, incrementAttempts,
 } from './journal.js';
-import { runCoder, clearEyesState } from './agents/coder.js';
-import { runTester } from './agents/tester.js';
-import { runSkillWriter } from './agents/skill.js';
+import { runCoder, clearEyesState } from '../agents/coder.js';
+import { runTester } from '../agents/tester.js';
+import { runSkillWriter } from '../agents/skill.js';
 import { isDockerAvailable, buildWorkspaceImage } from './docker.js';
 import { WORKSPACE, MAX_ATTEMPTS, ROOT } from './config.js';
 

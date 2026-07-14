@@ -3,8 +3,8 @@
 // советник принимает сам («Принял инженерные решения»); технические вопросы
 // клиенту ЗАПРЕЩЕНЫ на двух уровнях — промптом И regex-фильтром КОДОМ (шрам
 // 15); мусорный вход не превращается в бриф (шрам 16).
-import { callAgent } from '../engine.js';
-import { MAX_INTERVIEW_TURNS } from '../config.js';
+import { callAgent } from '../core/engine.js';
+import { MAX_INTERVIEW_TURNS } from '../core/config.js';
 
 const PROTOCOL_FILES = {
   wish: 'advisor.wish.md',

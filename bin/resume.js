@@ -1,9 +1,9 @@
 // resume.js — npm run resume (§25 ТЗ v4): убитый процесс оставляет claimed-
 // задачи; releaseStuck() при любом входе (шрам 25), затем довести очередь
 // pending до терминальных статусов.
-import { releaseStuck, listTasks } from './journal.js';
-import { runCoordinatorLoop } from './coordinator.js';
-import { WORKSPACE } from './config.js';
+import { releaseStuck, listTasks } from '../core/journal.js';
+import { runCoordinatorLoop } from '../core/coordinator.js';
+import { WORKSPACE } from '../core/config.js';
 
 async function main() {
   const released = releaseStuck();

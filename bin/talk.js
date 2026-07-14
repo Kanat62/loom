@@ -4,20 +4,20 @@
 // санитизация ввода (шрам 32).
 import fs from 'node:fs';
 import path from 'node:path';
-import { question, closeInput, sanitizeLine } from './io.js';
+import { question, closeInput, sanitizeLine } from '../core/io.js';
 import {
   isGarbageInput, startIntake, continueIntake, reviseDecisions, buildBrief, runAnalyst,
   buildConsultantReport,
-} from './agents/advisor.js';
-import { routeRequest } from './agents/router.js';
-import { runArchitect } from './agents/architect.js';
-import { listWorkspaceFileNames } from './agents/coder.js';
-import { runLivein } from './agents/livein.js';
-import { runCoordinatorLoop } from './coordinator.js';
+} from '../agents/advisor.js';
+import { routeRequest } from '../agents/router.js';
+import { runArchitect } from '../agents/architect.js';
+import { listWorkspaceFileNames } from '../agents/coder.js';
+import { runLivein } from '../agents/livein.js';
+import { runCoordinatorLoop } from '../core/coordinator.js';
 import {
   addTask, getTask, listTasks, releaseStuck, newRunId, setRootSpec, getRootSpec,
-} from './journal.js';
-import { WORKSPACE, HISTORY_DIR } from './config.js';
+} from '../core/journal.js';
+import { WORKSPACE, HISTORY_DIR } from '../core/config.js';
 
 const PROJECT_PROTOCOLS = new Set(['wish', 'problem', 'spec']);
 

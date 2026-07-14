@@ -4,8 +4,8 @@
 // workspace (замок пути — обязательный минимум с первого дня, §12.1).
 import fs from 'node:fs';
 import path from 'node:path';
-import { chat } from '../gateway.js';
-import { PROMPTS_DIR, EYES_MAX_FILE_BYTES, EYES_IGNORE_PATTERNS, EYES_BINARY_EXT } from '../config.js';
+import { chat } from '../core/gateway.js';
+import { PROMPTS_DIR, EYES_MAX_FILE_BYTES, EYES_IGNORE_PATTERNS, EYES_BINARY_EXT } from '../core/config.js';
 
 const CODER_SYSTEM_PROMPT = fs.readFileSync(path.join(PROMPTS_DIR, 'coder.md'), 'utf8');
 

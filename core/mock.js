@@ -9,7 +9,7 @@
 // тестер ловит это говорящим провалом, вторая попытка — уже верный код.
 // Вторая задача (зависит от первой) решается с первой попытки.
 import { pathToFileURL } from 'node:url';
-import { containsTechnicalQuestion } from './agents/advisor.js';
+import { containsTechnicalQuestion } from '../agents/advisor.js';
 
 const callCounters = new Map();
 
@@ -323,11 +323,11 @@ async function runCalculatorScenario() {
 // --- coordinator → skill_writer для wish-входа -----------------------------
 async function runProjectPipelineScenario() {
   const { newRunId, setRootSpec, getTask } = await import('./journal.js');
-  const { routeRequest } = await import('./agents/router.js');
-  const { startIntake, buildBrief } = await import('./agents/advisor.js');
-  const { runArchitect } = await import('./agents/architect.js');
+  const { routeRequest } = await import('../agents/router.js');
+  const { startIntake, buildBrief } = await import('../agents/advisor.js');
+  const { runArchitect } = await import('../agents/architect.js');
   const { runCoordinatorLoop } = await import('./coordinator.js');
-  const { listWorkspaceFileNames } = await import('./agents/coder.js');
+  const { listWorkspaceFileNames } = await import('../agents/coder.js');
   const { listSkills } = await import('./skills.js');
   const { WORKSPACE } = await import('./config.js');
   const fsMod = await import('node:fs');
@@ -372,8 +372,8 @@ async function runProjectPipelineScenario() {
   console.log(`[mock] project pipeline OK — 2 задачи + регрессия done, ${skills.length} урок(ов) записано.`);
 
   // --- Фаза 5.5: обживание ОДИН раз после зелёной доски + отчёт консультанта
-  const { runLivein } = await import('./agents/livein.js');
-  const { buildConsultantReport } = await import('./agents/advisor.js');
+  const { runLivein } = await import('../agents/livein.js');
+  const { buildConsultantReport } = await import('../agents/advisor.js');
 
   const liveinResult = await runLivein({ rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: 'default' });
   if (!liveinResult.ok) throw new Error(`live_in: не удалось осмотреть продукт: ${liveinResult.error}`);
@@ -399,9 +399,9 @@ async function runProjectPipelineScenario() {
 // --- Сценарий В (Фаза 3): tweak — router сам пишет критерий ---------------
 async function runTweakScenario() {
   const { addTask, getTask, newRunId } = await import('./journal.js');
-  const { routeRequest } = await import('./agents/router.js');
+  const { routeRequest } = await import('../agents/router.js');
   const { runCoordinatorLoop } = await import('./coordinator.js');
-  const { listWorkspaceFileNames } = await import('./agents/coder.js');
+  const { listWorkspaceFileNames } = await import('../agents/coder.js');
   const { WORKSPACE } = await import('./config.js');
 
   const runId = newRunId();
@@ -425,9 +425,9 @@ async function runTweakScenario() {
 // --- Сценарий Г (Фаза 3): question — read-only, без задач на доске --------
 async function runQuestionScenario() {
   const { newRunId, getRootSpec } = await import('./journal.js');
-  const { routeRequest } = await import('./agents/router.js');
-  const { runAnalyst } = await import('./agents/advisor.js');
-  const { listWorkspaceFileNames } = await import('./agents/coder.js');
+  const { routeRequest } = await import('../agents/router.js');
+  const { runAnalyst } = await import('../agents/advisor.js');
+  const { listWorkspaceFileNames } = await import('../agents/coder.js');
   const { WORKSPACE } = await import('./config.js');
 
   const runId = newRunId();

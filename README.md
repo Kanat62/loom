@@ -6,9 +6,9 @@
 первого пользователя), сдаёт отчётом консультанта: что сделано, почему именно
 так, как проверено, что требует вашего решения.
 
-Полная спецификация — [`LOOM_TZ_v4.md`](LOOM_TZ_v4.md) (ЧТО и ПОЧЕМУ) и
-[`LOOM_DEV_GUIDE.md`](LOOM_DEV_GUIDE.md) (КАК и в каком порядке). Решения,
-принятые в неочевидных местах при сборке — [`DECISIONS.md`](DECISIONS.md).
+Полная спецификация — [`docs/LOOM_TZ_v4.md`](docs/LOOM_TZ_v4.md) (ЧТО и ПОЧЕМУ) и
+[`docs/LOOM_DEV_GUIDE.md`](docs/LOOM_DEV_GUIDE.md) (КАК и в каком порядке). Решения,
+принятые в неочевидных местах при сборке — [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Что построено
 
@@ -28,17 +28,19 @@ npm run talk                # интерактивная сессия: question/
 ```
 
 Полный пошаговый прогон (включая реальные вызовы моделей, которые я по вашей
-просьбе не запускал) — в [`RUNBOOK.md`](RUNBOOK.md).
+просьбе не запускал) — в [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ## Структура
 
-См. LOOM_DEV_GUIDE.md §0 для полного дерева и §1 для контрактов кода. Коротко:
-`journal.js`/`skills.js` — две SQLite-базы (better-sqlite3 с фолбэком на
-`node:sqlite`); `gateway.js` — единственная точка вызовов модели (claude-cli);
-`coordinator.js` — детерминированный цикл захват→исполнение→вердикт;
-`agents/*.js` — роли (router, advisor, architect, coder, tester, skill,
-live_in); `talk.js`/`resume.js`/`ask.js`/`cli.js` — точки входа;
-`mock.js` — детерминированные ответы всех ролей для `MOCK=1`.
+См. `docs/LOOM_DEV_GUIDE.md` §0 для полного дерева и §1 для контрактов кода.
+Коротко: `core/` — машина без LLM-специфики ролей (`journal.js`/`skills.js` —
+две SQLite-базы с фолбэком better-sqlite3→`node:sqlite`; `gateway.js` —
+единственная точка вызовов модели (claude-cli); `coordinator.js` —
+детерминированный цикл захват→исполнение→вердикт; `mock.js` —
+детерминированные ответы всех ролей для `MOCK=1`); `agents/*.js` — роли
+(router, advisor, architect, coder, tester, skill, live_in); `bin/` —
+точки входа (`talk.js`/`resume.js`/`ask.js`/`cli.js`); `docs/` — спецификация
+и раннбук.
 
 ## MOCK-режим
 
@@ -46,4 +48,4 @@ live_in); `talk.js`/`resume.js`/`ask.js`/`cli.js` — точки входа;
 попытки — демонстрирует цикл поймал→отчёт→починил), полный конвейер
 router→advisor→architect→coordinator→skill_writer→live_in→отчёт консультанта,
 tweak, question и проверка замка пути. Ни одного вызова модели — обязательный
-смоук после любой правки машины (см. `DEV_GUIDE.md §11`).
+смоук после любой правки машины (см. `docs/LOOM_DEV_GUIDE.md §11`).

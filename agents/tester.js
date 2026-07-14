@@ -1,8 +1,8 @@
 // agents/tester.js — контур 1 (Checker), §9 ТЗ v4: тестер БЕЗ LLM, чистый
 // детерминированный код. Критерии из журнала, таймаут, отчёты до 1000
 // символов (шрам 20: 200 символов душили диагностику вложенных процессов).
-import { runCheck } from '../checkRunner.js';
-import { getTask } from '../journal.js';
+import { runCheck } from '../core/checkRunner.js';
+import { getTask } from '../core/journal.js';
 
 const REPORT_MAX_LEN = 1000;
 

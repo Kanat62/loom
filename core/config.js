@@ -5,7 +5,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const ROOT = __dirname;
+// core/ живёт на один уровень ниже корня репозитория — ROOT указывает на
+// родителя core/, чтобы workspace/, prompts/, .loom-tmp/, journal.db и
+// остальные корневые пути не переехали вместе с этим файлом (реорганизация
+// в core/bin/docs).
+export const ROOT = path.dirname(__dirname);
 
 // Цепочки фолбэков на роль (§5). Порядок = порядок попыток внутри круга.
 // architect: в основном Opus (качество дерева и критериев определяет весь прогон),

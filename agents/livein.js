@@ -5,8 +5,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { callAgent } from '../engine.js';
-import { addTask } from '../journal.js';
+import { callAgent } from '../core/engine.js';
+import { addTask } from '../core/journal.js';
 
 /**
  * Живой браузер через Playwright (§8.1: pathToFileURL, не склейка file://).

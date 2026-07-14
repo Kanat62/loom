@@ -13,15 +13,22 @@
 loom/
 ├── .env                      # секреты. НИКОГДА в git (инвариант §20.7)
 ├── .gitignore                # journal.db*, skills.db*, .history/, workspace/, .env, node_modules
-├── package.json              # type:module; все скрипты с --env-file=.env
-├── config.js                 # ROLES, MODEL_LIMITATIONS, лимиты, пути
-├── gateway.js                # шлюз: claude-cli (+выключенная HTTP-ветка), тиры, круги
-├── journal.js                # адаптер БД: better-sqlite3 | node:sqlite; tasks/events API
-├── skills.js                 # отдельная БД уроков (DEFERRED)
-├── coordinator.js            # цикл без LLM: claimNext → роль → вердикт
-├── checkRunner.js            # исполнение критериев: .cjs в workspace, bash для простых
-├── io.js                     # один readline на процесс, очередь строк
-├── engine.js                 # (Фаза 3+) общий цикл агента: промпт+контекст → вызов → парсинг
+├── package.json              # type:module; все скрипты с --env-file=.env, указывают на bin/*.js
+├── README.md
+├── core/                     # машина LOOM — без LLM-специфики ролей
+│   ├── config.js             #   ROLES, MODEL_LIMITATIONS, лимиты, пути (ROOT = родитель core/)
+│   ├── gateway.js            #   шлюз: claude-cli (+выключенная HTTP-ветка), тиры, круги
+│   ├── journal.js            #   адаптер БД: better-sqlite3 | node:sqlite; tasks/events API
+│   ├── db.js                 #   низкоуровневый driver БД (better-sqlite3 | node:sqlite фолбэк)
+│   ├── skills.js             #   отдельная БД уроков (DEFERRED)
+│   ├── coordinator.js        #   цикл без LLM: claimNext → роль → вердикт
+│   ├── checkRunner.js        #   исполнение критериев: .cjs в workspace, bash для простых
+│   ├── io.js                 #   один readline на процесс, очередь строк
+│   ├── engine.js             #   (Фаза 3+) общий цикл агента: промпт+контекст → вызов → парсинг
+│   ├── docker.js              #   (Фаза 4) опциональная Docker-песочница поверх checkRunner
+│   └── mock.js                #   детерминированные ответы всех ролей
+├── bin/                       # точки входа (все пути внутри — от корня репо, не от core/)
+│   ├── talk.js  cli.js  resume.js  ask.js
 ├── prompts/                  # СТАТИЧНЫЕ системные промпты (кэш, §5) — только файлы
 │   ├── advisor.wish.md       #   протоколы интервью по типам входа
 │   ├── advisor.problem.md
@@ -36,14 +43,18 @@ loom/
 ├── agents/
 │   ├── advisor.js  router.js  architect.js  coder.js
 │   ├── tester.js   livein.js  researcher.js skill.js
-├── talk.js  cli.js  resume.js  ask.js       # точки входа
-├── ingest.js                 # (Фаза 7) приём ТЗ-пакета: папка → root_spec
 ├── docker/
 │   └── coder.Dockerfile      # (Фаза 4) комната кодера
-├── mock.js                   # детерминированные ответы всех ролей
 ├── evals/                    # (Фаза 7) банк эталонных желаний + прогоны
+├── docs/                     # LOOM_TZ_v4.md, LOOM_DEV_GUIDE.md (этот файл), DECISIONS.md, RUNBOOK.md
+├── ingest.js                 # (Фаза 7) приём ТЗ-пакета: папка → root_spec
 └── workspace/                # продукт клиента. Единственное место записи кодера
 ```
+
+Пути `ROOT`/`WORKSPACE`/`PROMPTS_DIR`/`TMP_DIR`/`JOURNAL_DB_PATH` (`core/config.js`)
+строятся от родителя `core/`, а не от самого `core/` — БД, `.loom-tmp/`,
+`prompts/` и `workspace/` остаются в корне репозитория независимо от того,
+где физически лежит код, который их вычисляет.
 
 ---
 

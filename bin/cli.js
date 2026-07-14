@@ -2,8 +2,8 @@
 // Задача задаётся руками: свободным текстом, флагами или JSON-файлом.
 // Советник/router/architect подключаются в Фазе 3 (talk.js/ask.js).
 import fs from 'node:fs';
-import { addTask, getTask, releaseStuck } from './journal.js';
-import { runCoordinatorLoop } from './coordinator.js';
+import { addTask, getTask, releaseStuck } from '../core/journal.js';
+import { runCoordinatorLoop } from '../core/coordinator.js';
 
 function parseArgs(argv) {
   const args = { _: [] };

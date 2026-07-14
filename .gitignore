@@ -13,3 +13,4 @@ workspace/
 workspace.mock/
 *.log
 .loom-check-*.cjs
+.loom-tmp/sys-*.txt

@@ -1,6 +1,6 @@
 // Дочерний процесс для evals/race.js: захватывает задачи, пока они не
 // закончатся, и присылает список захваченных id родителю через IPC.
-import { claimNext, setStatus } from '../journal.js';
+import { claimNext, setStatus } from '../core/journal.js';
 
 const workerId = `worker-${process.argv[2]}`;
 const claimed = [];

@@ -1,8 +1,8 @@
 // ask.js — npm run ask -- "вопрос" (§25 ТЗ v4): прямой вход в advisor_analyst
 // (question-протокол), read-only, без интервью, без задач на доске.
-import { runAnalyst } from './agents/advisor.js';
-import { getRootSpec, newRunId } from './journal.js';
-import { WORKSPACE } from './config.js';
+import { runAnalyst } from '../agents/advisor.js';
+import { getRootSpec, newRunId } from '../core/journal.js';
+import { WORKSPACE } from '../core/config.js';
 
 async function main() {
   const questionText = process.argv.slice(2).join(' ').trim();
