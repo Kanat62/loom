@@ -156,6 +156,8 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
   incrementAttempts(task.id);
   const task2 = getTask(task.id);
 
+  console.log(`[coordinator] "${task2.title}" — попытка ${task2.attempts}/${MAX_ATTEMPTS}: ${task2.type === 'regression' ? 'регрессия, пропускаю кодера' : 'кодер работает...'}`);
+
   // Регрессия (§8.9, шрам 31): ТОЛЬКО повтор существующих критериев —
   // кодер не вызывается, писать нечего, весь смысл в tester-проходе.
   if (task2.type !== 'regression') {
@@ -178,11 +180,15 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
       }
       return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`);
     }
+    console.log(`[coordinator] кодер закончил (${coderResult.written.length} файлов) — коммичу и запускаю тестер...`);
     autoCommit(workspaceDir, `loom: coder attempt ${task2.attempts} on ${task.id} (${coderResult.written.length} файлов)`);
+  } else {
+    console.log('[coordinator] тестер проверяет критерии...');
   }
 
   const sandbox = ensureDockerSandbox(workspaceDir) ? 'docker' : 'local';
   const testResult = await runTester({ task: task2, workspaceDir, sandbox });
+  console.log(`[coordinator] тестер: ${testResult.pass ? 'PASS' : 'FAIL'} — ${testResult.report.slice(0, 200)}`);
   logEvent({
     run_id: runId, task_id: task.id, type: 'test_result', agent: 'tester',
     payload: { pass: testResult.pass, report: testResult.report },

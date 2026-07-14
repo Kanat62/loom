@@ -38,11 +38,23 @@ function validatePlan(plan) {
 
 const NPM_INSTALL_TIMEOUT_MS = 10 * 60_000; // пакеты вроде playwright тянут браузерный бинарник — даём запас
 
+// npm на Windows ставится как npm.cmd — прямой execFileSync без shell даёт
+// ENOENT (тот же инвариант §20.6, что и claude.cmd в gateway.js: явные
+// Windows-ветки для .cmd-бинарников). shell:true на Windows режет аргументы
+// с пробелами, поэтому оборачиваем их в JSON.stringify — валидное
+// cmd.exe-экранирование для путей/имён пакетов.
 function npmInstall(workspaceDir, packages) {
   if (!packages.length) return { ok: true, output: '(пакетов не требуется)' };
+  const isWin = process.platform === 'win32';
+  const args = ['install', '--no-audit', '--no-fund', ...packages];
   try {
-    const out = execFileSync('npm', ['install', '--no-audit', '--no-fund', ...packages], {
-      cwd: workspaceDir, stdio: 'pipe', timeout: NPM_INSTALL_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024,
+    const out = execFileSync('npm', isWin ? args.map((a) => JSON.stringify(String(a))) : args, {
+      cwd: workspaceDir,
+      stdio: 'pipe',
+      timeout: NPM_INSTALL_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+      shell: isWin,
+      windowsHide: isWin,
     });
     return { ok: true, output: out.toString().slice(0, 500) };
   } catch (e) {
