@@ -239,6 +239,11 @@ export function listEvents(filter = {}) {
   return db().prepare(`SELECT * FROM events ${where} ORDER BY id ASC`).all(...args);
 }
 
+/** Все события с created_at >= ts — для сеансового (не per-run_id) итога по токенам. */
+export function listEventsSince(ts) {
+  return db().prepare(`SELECT * FROM events WHERE created_at >= ? ORDER BY id ASC`).all(ts);
+}
+
 export function setRootSpec(projectId, spec, engineeringDefaults, route) {
   db().prepare(`
     INSERT INTO root_spec (project_id, spec, engineering_defaults, route, created_at)

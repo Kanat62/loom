@@ -2,6 +2,7 @@
 // опережающий ввод — пользователь печатал раньше, чем подписывались на 'line').
 // Плюс санитизация ввода сеанса (шрам 32: терминальный мусор склеился в title).
 import readline from 'node:readline';
+import { QUIET } from './config.js';
 
 let rl = null;
 const queue = [];
@@ -43,6 +44,18 @@ export function closeInput() {
     rl = null;
   }
   queue.length = 0;
+}
+
+/**
+ * Живой прогресс агентов: одна строка на существующее событие (router/
+ * advisor/architect/coder/tester/coordinator) — печать РЯДОМ с уже
+ * существующими точками logEvent, не новая система логирования. В stderr,
+ * не в stdout — не мешает readline-промпту, который живёт на stdout/stdin.
+ * LOOM_QUIET=1 глушит (для evals — чтобы не замусоривать их вывод).
+ */
+export function progress(line) {
+  if (QUIET) return;
+  process.stderr.write(`${line}\n`);
 }
 
 // eslint-disable-next-line no-control-regex

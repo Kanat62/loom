@@ -85,6 +85,9 @@ export const EYES_BINARY_EXT = new Set([
 export const MAX_INTERVIEW_TURNS = 6;
 
 export const MOCK = process.env.MOCK === '1';
+// Флаг тишины для evals: подавляет живой прогресс (io.js: progress()),
+// не трогает итоговые отчёты (report/status печатаются как обычно).
+export const QUIET = process.env.LOOM_QUIET === '1';
 // Синтетическая стоимость одного мок-вызова — позволяет детерминированно
 // проверять budget_usd-стоп без единого реального вызова модели (DEV_GUIDE
 // §4 DoD: «бюджет-стоп срабатывает на игрушечном лимите 0.01»), см. evals/budget.js.

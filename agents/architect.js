@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { callAgent } from '../core/engine.js';
 import { precheck } from '../core/checkRunner.js';
 import { addTask } from '../core/journal.js';
+import { progress } from '../core/io.js';
 
 function buildArchitectPrompt(brief, workspaceListing) {
   const parts = [
@@ -113,6 +114,11 @@ export async function runArchitect({
       error: `architect: npm install пакетов [${plan.packages.join(', ')}] не удался — задачи не созданы: ${install.output}`,
     };
   }
+
+  // Печать рядом с уже существующим usage-событием architect'а (logEvent
+  // внутри chat(), см. callAgent выше) — план уже валиден и пакеты стоят,
+  // список задач финальный.
+  progress(`[architect] задач: ${plan.tasks.length} (${plan.tasks.map((t) => t.title).join(', ')})`);
 
   const createdIds = [];
   const titleToId = new Map();

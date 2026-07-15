@@ -10,13 +10,14 @@ import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import {
   claimNext, setStatus, addSpent, isOverBudget, releaseStuck, newRunId,
-  logEvent, listEvents, getTask, incrementAttempts,
+  logEvent, listEvents, listTasks, getTask, incrementAttempts,
 } from './journal.js';
 import { runCoder, clearEyesState } from '../agents/coder.js';
 import { runTester } from '../agents/tester.js';
 import { runSkillWriter } from '../agents/skill.js';
 import { isDockerAvailable, buildWorkspaceImage } from './docker.js';
 import { WORKSPACE, MAX_ATTEMPTS, ROOT } from './config.js';
+import { progress } from './io.js';
 
 function git(args, cwd) {
   try {
@@ -116,7 +117,12 @@ function sumRunCost(runId, taskId) {
     .reduce((sum, e) => sum + (e.cost_usd || 0), 0);
 }
 
-function handleAttemptFailure(task, runId, report) {
+/** Сколько задач роли role ещё ждут — печатается вместе с вердиктом попытки. */
+function remainingCount(role) {
+  return listTasks({ status: 'pending', role }).length;
+}
+
+function handleAttemptFailure(task, runId, report, role) {
   const fresh = getTask(task.id);
   if (fresh.attempts >= MAX_ATTEMPTS) {
     setStatus(task.id, 'blocked_needs_human', { feedback: report });
@@ -125,18 +131,28 @@ function handleAttemptFailure(task, runId, report) {
       payload: { event: 'max_attempts_reached', attempts: fresh.attempts },
     });
     clearEyesState(task.id);
+    progress(`[coordinator] задача failed (blocked_needs_human), осталось ${remainingCount(role)}`);
     return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'max_attempts' };
   }
   setStatus(task.id, 'pending', { feedback: report });
+  progress(`[coordinator] задача failed (retry), осталось ${remainingCount(role)}`);
   return { task: getTask(task.id), verdict: 'retry' };
 }
 
-/** Захват и исполнение ОДНОЙ задачи роли role. Возвращает вердикт либо null, если задач нет. */
-export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
+/**
+ * Захват и исполнение ОДНОЙ задачи роли role. Возвращает вердикт либо null,
+ * если задач нет. sharedRunId (опционально) — если вызывающий (talk.js)
+ * ведёт один клиентский запрос через несколько задач дерева, все их events
+ * пишутся под одним run_id (§14: run_id прошивает все events сквозного
+ * запроса) — нужен для точного итога по токенам за запрос. Без него, как и
+ * раньше, каждая попытка получает свой независимый run_id (/resume, cli.js,
+ * evals — где нет единого «запроса», от которого можно унаследовать id).
+ */
+export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, sharedRunId = null) {
   const task = claimNext(role, `coordinator-${process.pid}`);
   if (!task) return null;
 
-  const runId = newRunId();
+  const runId = sharedRunId || newRunId();
   ensureWorkspaceGit(workspaceDir);
 
   logEvent({
@@ -150,13 +166,14 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
   if (isOverBudget(task.id)) {
     setStatus(task.id, 'blocked_needs_human', { feedback: 'FAIL: budget_usd задачи исчерпан до начала попытки' });
     clearEyesState(task.id);
+    progress(`[coordinator] задача failed (бюджет исчерпан), осталось ${remainingCount(role)}`);
     return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'budget' };
   }
 
   incrementAttempts(task.id);
   const task2 = getTask(task.id);
 
-  console.log(`[coordinator] "${task2.title}" — попытка ${task2.attempts}/${MAX_ATTEMPTS}: ${task2.type === 'regression' ? 'регрессия, пропускаю кодера' : 'кодер работает...'}`);
+  progress(`[coordinator] "${task2.title}" — попытка ${task2.attempts}/${MAX_ATTEMPTS}: ${task2.type === 'regression' ? 'регрессия, пропускаю кодера' : 'кодер работает...'}`);
 
   // Регрессия (§8.9, шрам 31): ТОЛЬКО повтор существующих критериев —
   // кодер не вызывается, писать нечего, весь смысл в tester-проходе.
@@ -167,6 +184,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
     if (coderResult.type === 'question') {
       setStatus(task.id, 'blocked_needs_human', { question: coderResult.question });
       clearEyesState(task.id);
+      progress(`[coordinator] задача failed (вопрос человеку), осталось ${remainingCount(role)}`);
       return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'question' };
     }
     if (coderResult.type === 'error') {
@@ -178,17 +196,19 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
           payload: { event: 'path_lock_blocked', error: coderResult.error },
         });
       }
-      return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`);
+      return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`, role);
     }
-    console.log(`[coordinator] кодер закончил (${coderResult.written.length} файлов) — коммичу и запускаю тестер...`);
+    // Печать рядом с уже существующим usage-событием кодера (logEvent внутри
+    // chat(), вызванного runCoder чуть выше).
+    progress(`[coder] задача "${task2.title}" попытка ${task2.attempts} → файлы: ${coderResult.written.join(', ') || '(нет)'}`);
     autoCommit(workspaceDir, `loom: coder attempt ${task2.attempts} on ${task.id} (${coderResult.written.length} файлов)`);
-  } else {
-    console.log('[coordinator] тестер проверяет критерии...');
   }
 
   const sandbox = ensureDockerSandbox(workspaceDir) ? 'docker' : 'local';
   const testResult = await runTester({ task: task2, workspaceDir, sandbox });
-  console.log(`[coordinator] тестер: ${testResult.pass ? 'PASS' : 'FAIL'} — ${testResult.report.slice(0, 200)}`);
+  // Печать рядом с уже существующим test_result-событием ниже — тестер сам
+  // LLM не вызывает (§9), это единственная точка, где известен вердикт.
+  progress(`[tester] критерий "${task2.title}" → ${testResult.pass ? 'PASS' : 'FAIL'} (${testResult.report.slice(0, 120).replace(/\n/g, ' ')})`);
   logEvent({
     run_id: runId, task_id: task.id, type: 'test_result', agent: 'tester',
     payload: { pass: testResult.pass, report: testResult.report },
@@ -199,10 +219,11 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE) {
     autoCommit(workspaceDir, `loom: done ${task.id}`);
     clearEyesState(task.id);
     await writeSkillSafely(task.id, runId);
+    progress(`[coordinator] задача done, осталось ${remainingCount(role)}`);
     return { task: getTask(task.id), verdict: 'done' };
   }
 
-  return handleAttemptFailure(task, runId, testResult.report);
+  return handleAttemptFailure(task, runId, testResult.report, role);
 }
 
 /** skill_writer — механически после done (§4); сбой этой роли не должен ронять координатор. */
@@ -221,8 +242,13 @@ async function writeSkillSafely(taskId, runId) {
  * Цикл координатора: gitGuard pre-flight (шрам 5) → releaseStuck() на
  * КАЖДОМ входе (шрам 25 — задачи навечно в claimed после смерти процесса),
  * затем обработка задач роли role до опустошения очереди или maxIterations.
+ * runId (опционально) — сквозной run_id одного клиентского запроса (talk.js);
+ * без него, как и раньше, каждая захваченная задача получает свой (см.
+ * processOneTask).
  */
-export async function runCoordinatorLoop({ role = 'coder', workspaceDir = WORKSPACE, maxIterations = Infinity } = {}) {
+export async function runCoordinatorLoop({
+  role = 'coder', workspaceDir = WORKSPACE, maxIterations = Infinity, runId = null,
+} = {}) {
   const guard = gitGuard();
   if (!guard.ok) {
     throw new Error(guard.message);
@@ -232,7 +258,7 @@ export async function runCoordinatorLoop({ role = 'coder', workspaceDir = WORKSP
   let iterations = 0;
   for (;;) {
     if (iterations >= maxIterations) break;
-    const result = await processOneTask(role, workspaceDir);
+    const result = await processOneTask(role, workspaceDir, runId);
     if (!result) break;
     results.push(result);
     iterations++;
