@@ -355,6 +355,24 @@ export function getRootSpec(projectId = 'default') {
   return db().prepare(`SELECT * FROM root_spec WHERE project_id = ?`).get(projectId) || null;
 }
 
+/**
+ * mergeRootSpec(existing, newSummary, newDefaults) — root_spec ДОПОЛНЯЕТСЯ,
+ * не перезаписывается (§4/§15: «лекарство от goal drift», реальный баг
+ * первого живого прогона — второй project-заход стирал engineering_defaults
+ * первого раньше, чем советник успевал их прочитать, см. DECISIONS «Часть
+ * 1»). Раньше жила как приватная функция в bin/talk.js — вынесена сюда
+ * после того, как она же понадобилась ДОСЛОВНО той же формы в bin/ingest.js
+ * и bin/telegram.js (третья копипаста подряд — риск разъехаться при правке
+ * одной и забытых двух остальных перевесил цену лишнего экспорта).
+ */
+export function mergeRootSpec(existing, newSummary, newDefaults) {
+  const existingDefaults = existing?.engineering_defaults ? JSON.parse(existing.engineering_defaults) : [];
+  const mergedDefaults = [...existingDefaults];
+  for (const d of newDefaults) if (!mergedDefaults.includes(d)) mergedDefaults.push(d);
+  const spec = existing?.spec ? `${existing.spec}\n\n[Дополнение] ${newSummary}` : newSummary;
+  return { spec, engineeringDefaults: mergedDefaults };
+}
+
 /** Для evals/race.js и диагностики — прямой доступ к сырой БД не экспортируем специально. */
 export function _debugDbPath() {
   return JOURNAL_DB_PATH;

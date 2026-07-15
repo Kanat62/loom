@@ -21,7 +21,7 @@ import { runArchitect } from '../agents/architect.js';
 import { listWorkspaceFileNames } from '../agents/coder.js';
 import { runCoordinatorLoop } from '../core/coordinator.js';
 import {
-  addTask, getTask, newRunId, setRootSpec, getRootSpec, releaseStuck,
+  addTask, getTask, newRunId, setRootSpec, getRootSpec, releaseStuck, mergeRootSpec,
 } from '../core/journal.js';
 import { WORKSPACE, MOCK } from '../core/config.js';
 
@@ -58,14 +58,6 @@ function boardSummaryText(taskIds) {
     if (!t) return `- ${id}: (не найдена)`;
     return `- [${t.type}] "${t.title}" — ${t.status}`;
   }).join('\n');
-}
-
-function mergeRootSpec(existing, newSummary, newDefaults) {
-  const existingDefaults = existing?.engineering_defaults ? JSON.parse(existing.engineering_defaults) : [];
-  const mergedDefaults = [...existingDefaults];
-  for (const d of newDefaults) if (!mergedDefaults.includes(d)) mergedDefaults.push(d);
-  const spec = existing?.spec ? `${existing.spec}\n\n[Дополнение] ${newSummary}` : newSummary;
-  return { spec, engineeringDefaults: mergedDefaults };
 }
 
 async function finishProject(chatId, protocol, step, runId) {

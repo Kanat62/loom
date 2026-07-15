@@ -1305,6 +1305,52 @@ async function runTelegramScenario() {
   console.log(`[mock] telegram: handleIncoming (tweak-маршрут, MOCK-модели) → sendMessage в chat 777: "${sendCalls[0].body.text.slice(0, 60)}..."`);
 }
 
+// --- Сценарий (П§9, закрывает долг части 1): advisor не переспрашивает --
+// --- уже решённое — сквозной тест на buildUserText + mergeRootSpec --------
+// DECISIONS «Часть 1» прямо отмечает: ветка hasExisting была синтаксически
+// проверена, но не прогнана сквозным тестом — «стоит добавить в следующем
+// цикле правок». Это он.
+async function runContextInheritanceRegressionScenario() {
+  const { buildUserText } = await import('../agents/advisor.js');
+  const { mergeRootSpec } = await import('./journal.js');
+
+  const withoutContext = buildUserText('wish', [{ role: 'client', text: 'хочу сайт' }], null);
+  if (/Контекст УЖЕ существующего продукта/.test(withoutContext)) {
+    throw new Error('advisor: секция существующего контекста не должна появляться без rootSpec/engineeringDefaults');
+  }
+
+  const withContext = buildUserText('wish', [{ role: 'client', text: 'добавь фильтр по цвету' }], {
+    rootSpec: 'Кофейня-лайт: меню, онлайн-заказ',
+    engineeringDefaults: ['Тёмная тема по умолчанию', 'Один HTML-файл на клиенте'],
+  });
+  if (!/Контекст УЖЕ существующего продукта/.test(withContext)
+    || !/Тёмная тема по умолчанию/.test(withContext)
+    || !/Кофейня-лайт: меню, онлайн-заказ/.test(withContext)) {
+    throw new Error(`advisor: секция существующего контекста должна дословно включать rootSpec И прежние engineering_defaults, получили:\n${withContext}`);
+  }
+  console.log('[mock] advisor context-inheritance: buildUserText корректно включает/опускает «Контекст УЖЕ существующего продукта» — закрывает долг части 1.');
+
+  // mergeRootSpec — второй заход ДОПОЛНЯЕТ, не стирает (тот самый реальный
+  // баг из DECISIONS «Часть 1»: второй project затирал engineering_defaults
+  // первого до setRootSpec).
+  const merged1 = mergeRootSpec(null, 'Кофейня-лайт: меню, онлайн-заказ', ['Тёмная тема по умолчанию']);
+  const merged2 = mergeRootSpec(
+    { spec: merged1.spec, engineering_defaults: JSON.stringify(merged1.engineeringDefaults) },
+    'добавь фильтр по цвету',
+    ['Фильтр — выпадающий список'],
+  );
+  if (!merged2.engineeringDefaults.includes('Тёмная тема по умолчанию')) {
+    throw new Error(`mergeRootSpec: второй заход потерял решение первого захода: ${JSON.stringify(merged2)}`);
+  }
+  if (!merged2.engineeringDefaults.includes('Фильтр — выпадающий список')) {
+    throw new Error(`mergeRootSpec: второй заход не добавил своё решение: ${JSON.stringify(merged2)}`);
+  }
+  if (!merged2.spec.includes('Кофейня-лайт') || !merged2.spec.includes('добавь фильтр по цвету')) {
+    throw new Error(`mergeRootSpec: summary должен расти припиской, а не заменяться: ${merged2.spec}`);
+  }
+  console.log('[mock] mergeRootSpec: второй заход дополняет engineering_defaults/summary первого, ничего не теряет — закрывает долг части 1.');
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -1348,6 +1394,7 @@ async function main() {
     ['дашборд: node:http смоук — список/детали/чат, ноль записи в доску (§22, П§7.2)', runDashboardSmokeScenario],
     ['maintenance-минимум: regression_detected как tweak + AUTO_MERGES_PER_DAY (§18, П§7.3)', runMaintenanceScenario],
     ['Telegram-вход (опционально): parseUpdate + handleIncoming с подставным fetch (П§7)', runTelegramScenario],
+    ['advisor не переспрашивает уже решённое (buildUserText + mergeRootSpec, закрывает долг части 1, П§9)', runContextInheritanceRegressionScenario],
   ];
 
   let failed = false;

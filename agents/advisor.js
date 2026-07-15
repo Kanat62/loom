@@ -54,7 +54,13 @@ function renderHistory(history) {
   }).join('\n');
 }
 
-function buildUserText(protocol, history, existingContext) {
+// Экспортирована (не просто внутренняя деталь) — часть 1 долг из
+// docs/DECISIONS.md: «отдельного MOCK-регресса на "не переспрашивает уже
+// решённое" не было, ветка hasExisting синтаксически проверена, но не
+// прогнана сквозным тестом». Закрыт в core/mock.js:runContextInheritanceRegressionScenario
+// прямой проверкой этой чистой функции — то же самое, что должен проверять
+// сквозной тест, без необходимости гонять живую модель.
+export function buildUserText(protocol, history, existingContext) {
   const parts = [`## Протокол\n${protocol}`];
 
   // Реальный баг с первого живого прогона: советник спрашивал то, что УЖЕ

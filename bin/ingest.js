@@ -12,18 +12,10 @@ import { buildConsultantReport } from '../agents/advisor.js';
 import { listWorkspaceFileNames } from '../agents/coder.js';
 import { runCoordinatorLoop } from '../core/coordinator.js';
 import {
-  getTask, newRunId, setRootSpec, getRootSpec, releaseStuck, listEvents,
+  getTask, newRunId, setRootSpec, getRootSpec, releaseStuck, listEvents, mergeRootSpec,
 } from '../core/journal.js';
 import { WORKSPACE, MOCK, GITHUB_PUSH } from '../core/config.js';
 import { ensureProductRepo, slugify } from '../core/github.js';
-
-function mergeRootSpec(existing, newSummary, newDefaults) {
-  const existingDefaults = existing?.engineering_defaults ? JSON.parse(existing.engineering_defaults) : [];
-  const mergedDefaults = [...existingDefaults];
-  for (const d of newDefaults) if (!mergedDefaults.includes(d)) mergedDefaults.push(d);
-  const spec = existing?.spec ? `${existing.spec}\n\n[Дополнение] ${newSummary}` : newSummary;
-  return { spec, engineeringDefaults: mergedDefaults };
-}
 
 function boardSummaryText(taskIds) {
   return taskIds.map((id) => {

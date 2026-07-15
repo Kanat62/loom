@@ -18,7 +18,7 @@ import { runIngest } from '../agents/ingest.js';
 import { runCoordinatorLoop } from '../core/coordinator.js';
 import {
   addTask, getTask, listTasks, releaseStuck, newRunId, setRootSpec, getRootSpec,
-  listEvents, listEventsSince,
+  listEvents, listEventsSince, mergeRootSpec,
 } from '../core/journal.js';
 import { WORKSPACE, HISTORY_DIR, MOCK, GITHUB_PUSH } from '../core/config.js';
 import { ensureProductRepo, slugify } from '../core/github.js';
@@ -117,23 +117,6 @@ function printStatus() {
   printSessionTokenSummary();
 }
 
-/**
- * root_spec — стабильный якорь исходной цели (§4/§15, лекарство от goal
- * drift). Реальный баг с первого живого прогона: каждый новый wish/problem/
- * spec на том же проекте ПЕРЕЗАПИСЫВАЛ root_spec целиком — второй запрос
- * («добавь фильтр и поиск») стирал engineering_defaults первого запроса
- * (какие поля на карточке и т.п.), из-за чего советник во второй раз не мог
- * их унаследовать при всём желании. Теперь первый заход создаёт root_spec,
- * последующие ДОПОЛНЯЮТ его (объединение engineering_defaults, summary
- * растёт припиской, не заменяется).
- */
-function mergeRootSpec(existing, newSummary, newDefaults) {
-  const existingDefaults = existing?.engineering_defaults ? JSON.parse(existing.engineering_defaults) : [];
-  const mergedDefaults = [...existingDefaults];
-  for (const d of newDefaults) if (!mergedDefaults.includes(d)) mergedDefaults.push(d);
-  const spec = existing?.spec ? `${existing.spec}\n\n[Дополнение] ${newSummary}` : newSummary;
-  return { spec, engineeringDefaults: mergedDefaults };
-}
 
 async function runProjectFlow(protocol, initialText, runId) {
   const existingRootSpec = getRootSpec('default');
