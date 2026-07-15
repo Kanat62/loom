@@ -11,6 +11,8 @@ skills.mock.db-*
 .history/
 workspace/
 workspace.mock/
+tools/
+tools.mock/
 *.log
 .loom-check-*.cjs
 .loom-tmp/sys-*.txt

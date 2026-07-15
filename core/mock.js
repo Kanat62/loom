@@ -54,10 +54,14 @@ registerMockHandler('coder', ({ userMsg }) => {
   const title = titleMatch ? titleMatch[1] : userMsg;
   const hasFeedback = /## Отчёт тестера/.test(userMsg);
   const isViewportPolish = /viewport/i.test(title);
+  const isWordCountBuild = /Инструмент word-count/.test(title);
+  const isWordCountResultPage = /результат подсчёта слов/.test(title);
   const isCalc = /calc\.js/.test(title) && !/index\.html/.test(title);
-  // isPage матчит по "index.html" в title — исключаем viewport-правку явно,
-  // иначе она перехватывается сюда (её title тоже упоминает index.html).
-  const isPage = /index\.html/.test(title) && !isViewportPolish;
+  // isPage матчит по "index.html" в title — исключаем viewport-правку и
+  // Кузницу явно, иначе они перехватываются сюда (их title тоже упоминает
+  // index.html) — тот же класс бага, что уже пойман для viewport (DECISIONS
+  // Фаза 5.5): сопоставление по подстроке в тексте, где встречаются чужие подстроки.
+  const isPage = /index\.html/.test(title) && !isViewportPolish && !isWordCountResultPage;
 
   if (isCalc) {
     if (!hasFeedback) {
@@ -144,6 +148,55 @@ registerMockHandler('coder', ({ userMsg }) => {
     return { files: { '../evil.js': "console.log('escaped workspace');\n" } };
   }
 
+  // §26.6 Кузница: инструмент word-count. Первая попытка — нарочная ошибка
+  // (неверный код выхода, а не логика подсчёта) — демонстрирует цикл
+  // поймал→отчёт→починил ровно для tool-задачи, как калькулятор — для project.
+  if (isWordCountBuild) {
+    const toolManifest = JSON.stringify({
+      name: 'word-count',
+      version: 1,
+      description: 'считает слова в текстовом файле, пишет {count} в JSON-файл',
+      args: ['inFile', 'outFile'],
+      network: 'none',
+      timeout_ms: 10000,
+    }, null, 2);
+    const runJsBody = [
+      "const fs = require('fs');",
+      'const [, , inFile, outFile] = process.argv;',
+      "const text = fs.readFileSync(inFile, 'utf8');",
+      'const count = text.trim().split(/\\s+/).filter(Boolean).length;',
+      'fs.writeFileSync(outFile, JSON.stringify({ count }));',
+    ];
+    if (!hasFeedback) {
+      return {
+        files: {
+          'run.js': [...runJsBody, 'process.exit(1); // БАГ: неверный код выхода даже при успешном подсчёте', ''].join('\n'),
+          'tool.json': `${toolManifest}\n`,
+        },
+      };
+    }
+    return {
+      files: {
+        'run.js': [...runJsBody, ''].join('\n'),
+        'tool.json': `${toolManifest}\n`,
+      },
+    };
+  }
+
+  // §26.6: продукт читает result.json, который написал tool_run word-count.
+  if (isWordCountResultPage) {
+    return {
+      files: {
+        'index.html': [
+          '<!doctype html>',
+          '<html><head><meta charset="utf-8"><title>Результат</title></head>',
+          '<body><div id="result">Слов: 5</div></body></html>',
+          '',
+        ].join('\n'),
+      },
+    };
+  }
+
   // Задача вне сценария калькулятора (например, evals/budget.js) — детерминированная
   // заглушка-файл, чтобы другие MOCK-прогоны могли переиспользовать этот хендлер,
   // не расширяя сам сценарий-эталон.
@@ -217,29 +270,71 @@ registerMockHandler('advisor', ({ userMsg, opts }) => {
 // Переиспользует сценарий калькулятора — тот же MOCK_HANDLERS.coder уже умеет
 // отвечать на эти title/spec, так что весь конвейер router→advisor→architect→
 // coordinator проверяется на одном известном продукте без дублирования логики.
-registerMockHandler('architect', () => ({
-  packages: [],
-  tasks: [
-    {
-      title: 'calc.js: экспортирует add(a,b) и subtract(a,b)',
-      spec: 'Создай calc.js в корне workspace. module.exports = { add, subtract }. add(a,b)=a+b, subtract(a,b)=a-b.',
-      criteria: {
-        cmd: 'node -e "const c=require(\'./calc.js\'); const a=c.add(2,3), s=c.subtract(5,2); if(a===5 && s===3){console.log(\'PASS add=\'+a+\' subtract=\'+s)}else{console.error(\'FAIL: add(2,3)=\'+a+\' (ожидалось 5), subtract(5,2)=\'+s+\' (ожидалось 3)\'); process.exit(1)}"',
+registerMockHandler('architect', ({ userMsg }) => {
+  // §26.6 Кузница: DAG tool → tool_run → project, читающий результат.
+  if (/ТЕСТ_КУЗНИЦА/.test(userMsg)) {
+    return {
+      packages: [],
+      tasks: [
+        {
+          title: 'Инструмент word-count: считает слова в файле',
+          type: 'tool',
+          tool_name: 'word-count',
+          spec: 'Собери tools/word-count/run.js — первый аргумент: путь входного файла, второй: путь выходного JSON. Пишет {"count":N} и завершается кодом 0. Плюс обязательный tool.json.',
+          criteria: {
+            cmd: "node -e \"const fs=require('fs');const{execFileSync}=require('child_process');fs.writeFileSync('fixture.txt','one two three four five');try{execFileSync('node',['run.js','fixture.txt','out.json']);}catch(e){console.error('FAIL: run.js завершился с ошибкой: '+e.message);process.exit(1);}const out=JSON.parse(fs.readFileSync('out.json','utf8'));if(out.count===5){console.log('PASS count=5')}else{console.error('FAIL: ожидали count=5, получили '+JSON.stringify(out));process.exit(1)}\"",
+          },
+          touches_files: ['run.js', 'tool.json'],
+          depends_on_title: null,
+        },
+        {
+          title: 'Запуск word-count на demo.txt продукта',
+          type: 'tool_run',
+          tool_name: 'word-count',
+          tool_args: ['demo.txt', 'result.json'],
+          spec: 'Запусти word-count на demo.txt продукта, результат — result.json.',
+          criteria: {
+            cmd: "node -e \"const fs=require('fs');if(!fs.existsSync('result.json')){console.error('FAIL: result.json не создан');process.exit(1)}const r=JSON.parse(fs.readFileSync('result.json','utf8'));if(r.count===5){console.log('PASS result.json count=5')}else{console.error('FAIL: result.json содержит '+JSON.stringify(r));process.exit(1)}\"",
+          },
+          depends_on_title: 'Инструмент word-count: считает слова в файле',
+        },
+        {
+          title: 'index.html: показывает результат подсчёта слов',
+          spec: 'Создай index.html, который печатает "Слов: N" — N результат word-count из result.json (лежит рядом, в корне workspace).',
+          criteria: {
+            cmd: "node -e \"const fs=require('fs');const h=fs.readFileSync('index.html','utf8');const r=JSON.parse(fs.readFileSync('result.json','utf8'));const needle='Слов: '+r.count;if(h.includes(needle)){console.log('PASS html содержит '+needle)}else{console.error('FAIL: index.html не содержит \\''+needle+'\\'');process.exit(1)}\"",
+          },
+          touches_files: ['index.html'],
+          depends_on_title: 'Запуск word-count на demo.txt продукта',
+        },
+      ],
+    };
+  }
+
+  return {
+    packages: [],
+    tasks: [
+      {
+        title: 'calc.js: экспортирует add(a,b) и subtract(a,b)',
+        spec: 'Создай calc.js в корне workspace. module.exports = { add, subtract }. add(a,b)=a+b, subtract(a,b)=a-b.',
+        criteria: {
+          cmd: 'node -e "const c=require(\'./calc.js\'); const a=c.add(2,3), s=c.subtract(5,2); if(a===5 && s===3){console.log(\'PASS add=\'+a+\' subtract=\'+s)}else{console.error(\'FAIL: add(2,3)=\'+a+\' (ожидалось 5), subtract(5,2)=\'+s+\' (ожидалось 3)\'); process.exit(1)}"',
+        },
+        touches_files: ['calc.js'],
+        depends_on_title: null,
       },
-      touches_files: ['calc.js'],
-      depends_on_title: null,
-    },
-    {
-      title: 'index.html: калькулятор подключает calc.js и показывает 2+3 и 5-2',
-      spec: 'Создай index.html. Подключи calc.js через <script src="calc.js"></script>. В теле должны быть числа 5 и 3.',
-      criteria: {
-        cmd: 'node -e "const fs=require(\'fs\'); const h=fs.readFileSync(\'index.html\',\'utf8\'); const ok=h.includes(\'calc.js\')&&h.includes(\'5\')&&h.includes(\'3\'); if(ok){console.log(\'PASS html содержит calc.js и результаты\')}else{console.error(\'FAIL: index.html не содержит calc.js или результаты\'); process.exit(1)}"',
+      {
+        title: 'index.html: калькулятор подключает calc.js и показывает 2+3 и 5-2',
+        spec: 'Создай index.html. Подключи calc.js через <script src="calc.js"></script>. В теле должны быть числа 5 и 3.',
+        criteria: {
+          cmd: 'node -e "const fs=require(\'fs\'); const h=fs.readFileSync(\'index.html\',\'utf8\'); const ok=h.includes(\'calc.js\')&&h.includes(\'5\')&&h.includes(\'3\'); if(ok){console.log(\'PASS html содержит calc.js и результаты\')}else{console.error(\'FAIL: index.html не содержит calc.js или результаты\'); process.exit(1)}"',
+        },
+        touches_files: ['index.html'],
+        depends_on_title: 'calc.js: экспортирует add(a,b) и subtract(a,b)',
       },
-      touches_files: ['index.html'],
-      depends_on_title: 'calc.js: экспортирует add(a,b) и subtract(a,b)',
-    },
-  ],
-}));
+    ],
+  };
+});
 
 // --- Фаза 5.5: live_in (обживатель) ----------------------------------------
 // Реальная (не выдуманная) шероховатость: architect-сценарий калькулятора не
@@ -491,6 +586,103 @@ async function runPathLockScenario() {
   console.log('[mock] path-lock OK — запись вне workspace заблокирована и залогирована событием path_lock_blocked.');
 }
 
+// --- Сценарий Е (§26.6, П§4): Кузница инструментов — сборка (поймал→починил) →
+// --- регистрация → tool_run → продукт читает результат; version-bump ------
+async function runForgeScenario() {
+  const {
+    newRunId, setRootSpec, getTask, listEvents,
+  } = await import('./journal.js');
+  const { routeRequest } = await import('../agents/router.js');
+  const { startIntake, buildBrief } = await import('../agents/advisor.js');
+  const { runArchitect } = await import('../agents/architect.js');
+  const { runCoordinatorLoop } = await import('./coordinator.js');
+  const { listWorkspaceFileNames } = await import('../agents/coder.js');
+  const { getTool, registerTool } = await import('./tools.js');
+  const { WORKSPACE, TOOLS_DIR } = await import('./config.js');
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+
+  // Сценарий самодостаточен (тот же принцип, что и project pipeline): не
+  // зависит от того, что оставили предыдущие сценарии в workspace/tools.
+  if (fsMod.existsSync(WORKSPACE)) fsMod.rmSync(WORKSPACE, { recursive: true, force: true });
+  if (fsMod.existsSync(TOOLS_DIR)) fsMod.rmSync(TOOLS_DIR, { recursive: true, force: true });
+  fsMod.mkdirSync(WORKSPACE, { recursive: true });
+  // demo.txt продукта — вход для tool_run; в реальном сценарии его создала бы
+  // предыдущая задача дерева, здесь сценарий готовит его сам, чтобы не тянуть
+  // многозвенный fan-in (task_deps на ДВЕ задачи) только ради демонстрации Кузницы.
+  fsMod.writeFileSync(pathMod.join(WORKSPACE, 'demo.txt'), 'one two three four five', 'utf8');
+
+  const runId = newRunId();
+  const text = 'ТЕСТ_КУЗНИЦА: хочу инструмент, который считает слова в demo.txt, и страницу с результатом.';
+
+  const routed = await routeRequest({ text, workspaceFiles: listWorkspaceFileNames(WORKSPACE), runId });
+  if (routed.route !== 'wish') throw new Error(`forge: ожидали route=wish, получили ${routed.route}`);
+
+  const { step } = await startIntake({ protocol: 'wish', initialText: text, runId });
+  if (step.type !== 'ready') throw new Error('forge: мок-советник должен сразу вернуть ready');
+
+  const brief = buildBrief({ protocol: 'wish', initialText: text, step });
+  setRootSpec('default', brief.summary, brief.engineering_defaults, 'wish');
+
+  const architectResult = await runArchitect({
+    brief, workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: 'default',
+  });
+  if (!architectResult.ok) throw new Error(`forge: architect failed: ${architectResult.error}`);
+  if (architectResult.taskIds.length !== 3) {
+    throw new Error(`forge: ожидали 3 задачи (tool+tool_run+project), получили ${architectResult.taskIds.length}`);
+  }
+
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+
+  const allIds = [...architectResult.taskIds, architectResult.regressionId];
+  const finalTasks = allIds.map(getTask);
+  console.log(`[mock] forge: ${finalTasks.map((t) => `${t.type}:${t.status}`).join(', ')}`);
+  if (!finalTasks.every((t) => t.status === 'done')) {
+    throw new Error('forge: не все задачи дерева (включая регрессию) дошли до done');
+  }
+
+  const buildTask = finalTasks.find((t) => t.type === 'tool');
+  if (!buildTask) throw new Error('forge: задача type=tool не найдена в дереве');
+  if (buildTask.attempts < 2) {
+    throw new Error(`forge: ожидали ≥2 попытки сборки word-count (демонстрация поймал→починил), получили ${buildTask.attempts}`);
+  }
+
+  const tool = getTool('word-count');
+  if (!tool) throw new Error('forge: word-count не зарегистрирован в tools после done');
+  if (tool.created_by_task !== buildTask.id) {
+    throw new Error(`forge: tools.created_by_task (${tool.created_by_task}) не совпадает с задачей сборки (${buildTask.id})`);
+  }
+  console.log(`[mock] forge: word-count зарегистрирован (v${tool.version}, created_by_task=${tool.created_by_task})`);
+
+  const toolRunEvents = listEvents({ type: 'tool_run' });
+  if (!toolRunEvents.length) throw new Error('forge: событие tool_run не найдено в events');
+  console.log(`[mock] forge: событие tool_run найдено (${toolRunEvents.length})`);
+
+  const resultPath = pathMod.join(WORKSPACE, 'result.json');
+  if (!fsMod.existsSync(resultPath)) throw new Error('forge: result.json не создан tool_run в workspace продукта (§26.3 п.1: cwd=workspace)');
+  const result = JSON.parse(fsMod.readFileSync(resultPath, 'utf8'));
+  if (result.count !== 5) throw new Error(`forge: ожидали count=5 в result.json, получили ${JSON.stringify(result)}`);
+
+  console.log('[mock] forge OK — сборка (поймал→починил) → регистрация → tool_run → продукт честно читает результат.');
+
+  // --- reuse + version-bump при повторном заказе с изменённым описанием (DoD §26.6) ---
+  const before = getTool('word-count');
+  registerTool({ name: 'word-count', description: `${before.description} (обновлено)`, created_by_task: buildTask.id });
+  const afterBump = getTool('word-count');
+  if (afterBump.version !== before.version + 1) {
+    throw new Error(`forge: ожидали version-bump v${before.version}→v${before.version + 1} при изменённом описании, получили v${afterBump.version}`);
+  }
+  console.log(`[mock] forge: version-bump подтверждён (v${before.version} → v${afterBump.version}) при изменённом описании.`);
+
+  // Повторная регистрация с ТЕМ ЖЕ описанием — reuse идемпотентен, версия не растёт.
+  registerTool({ name: 'word-count', description: afterBump.description, created_by_task: buildTask.id });
+  const afterSame = getTool('word-count');
+  if (afterSame.version !== afterBump.version) {
+    throw new Error(`forge: повторная регистрация с тем же описанием не должна менять версию (v${afterBump.version} → v${afterSame.version})`);
+  }
+  console.log('[mock] forge: повторная регистрация с тем же описанием — версия не изменилась (reuse идемпотентен).');
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -502,7 +694,7 @@ async function main() {
   resetMockState();
 
   const fs = await import('node:fs');
-  const { JOURNAL_DB_PATH, SKILLS_DB_PATH, WORKSPACE } = await import('./config.js');
+  const { JOURNAL_DB_PATH, SKILLS_DB_PATH, WORKSPACE, TOOLS_DIR } = await import('./config.js');
   for (const dbPath of [JOURNAL_DB_PATH, SKILLS_DB_PATH]) {
     for (const suffix of ['', '-wal', '-shm']) {
       const p = dbPath + suffix;
@@ -510,6 +702,9 @@ async function main() {
     }
   }
   if (fs.existsSync(WORKSPACE)) fs.rmSync(WORKSPACE, { recursive: true, force: true });
+  // Кузница (§26, П§4): tools.mock/ — та же изоляция, что у workspace.mock
+  // (баг №1 первого живого прогона — MOCK и реальный режим не делят состояние).
+  if (fs.existsSync(TOOLS_DIR)) fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
 
   const { releaseStuck } = await import('./journal.js');
   releaseStuck();
@@ -517,6 +712,7 @@ async function main() {
   const scenarios = [
     ['calculator (Фаза 1/2)', runCalculatorScenario],
     ['project pipeline: wish → router/advisor/architect/coordinator/skill (Фаза 3)', runProjectPipelineScenario],
+    ['Кузница инструментов: word-count (§26.6)', runForgeScenario],
     ['tweak: router пишет критерий сам (Фаза 3)', runTweakScenario],
     ['question: read-only аналитик, без задач (Фаза 3)', runQuestionScenario],
     ['path-lock: запись вне workspace блокируется и логируется (Фаза 4)', runPathLockScenario],

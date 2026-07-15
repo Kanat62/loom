@@ -2,11 +2,14 @@
 // packages→npm install ДО кодера (шрам 22); предпроверка критериев с тихим
 // логом (шрам 19); контракт регрессии §8.9 (склейка id, не новая проверка,
 // шрам 31).
+import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { callAgent } from '../core/engine.js';
 import { precheck } from '../core/checkRunner.js';
 import { addTask } from '../core/journal.js';
 import { progress } from '../core/io.js';
+import { TOOLS_DIR } from '../core/config.js';
+import { listTools } from '../core/tools.js';
 
 function buildArchitectPrompt(brief, workspaceListing) {
   const parts = [
@@ -22,16 +25,27 @@ function buildArchitectPrompt(brief, workspaceListing) {
       `Почему: ${brief.problem.why || ''}`,
     ].join('\n'));
   }
+  // §26.2 п.1 reuse-first: реестр в контексте на КАЖДОМ вызове, не только
+  // когда явно похоже, что нужен инструмент — архитектор сам решает.
+  const tools = listTools();
+  parts.push(`## Реестр существующих инструментов (reuse-first — переиспользуй, не дублируй)\n${tools.length ? tools.map((t) => `- ${t.name} (v${t.version}): ${t.description}`).join('\n') : '(пока нет ни одного инструмента)'}`);
   parts.push(`## Текущие файлы workspace (только имена)\n${workspaceListing.length ? workspaceListing.join('\n') : '(пусто)'}`);
   return parts.join('\n\n');
 }
 
+const TASK_TYPES = new Set(['tool', 'tool_run']); // 'project' — дефолт, в план не пишется явно
+
 function validatePlan(plan) {
   if (!plan || !Array.isArray(plan.tasks) || !plan.tasks.length) return null;
-  const tasks = plan.tasks.filter((t) => t
-    && typeof t.title === 'string' && t.title.trim()
-    && typeof t.spec === 'string'
-    && t.criteria && typeof t.criteria === 'object' && typeof t.criteria.cmd === 'string');
+  const tasks = plan.tasks
+    .filter((t) => t
+      && typeof t.title === 'string' && t.title.trim()
+      && typeof t.spec === 'string'
+      && t.criteria && typeof t.criteria === 'object' && typeof t.criteria.cmd === 'string')
+    .map((t) => ({ ...t, type: TASK_TYPES.has(t.type) ? t.type : 'project' }))
+    // §26.2: tool/tool_run без tool_name — брак, отбрасываем задачу целиком
+    // (архитектор ошибся в схеме), не превращаем в мусорную обычную задачу.
+    .filter((t) => t.type === 'project' || (typeof t.tool_name === 'string' && t.tool_name.trim()));
   if (!tasks.length) return null;
   const packages = Array.isArray(plan.packages) ? plan.packages.filter((p) => typeof p === 'string' && p.trim()) : [];
   return { packages, tasks };
@@ -127,7 +141,12 @@ export async function runArchitect({
   for (const t of plan.tasks) {
     let criteria = t.criteria;
     // Предпроверка (шрам 19): тихо (pipe, 5с) прогоняем критерий ДО кодера.
-    const pre = await precheck(criteria, workspaceDir, { sandbox });
+    // §26: для type=tool — cwd ТОТ ЖЕ контракт, что боевой прогон (тот же
+    // корень, что увидит кодер и тестер — tools/<tool_name>/, обычно ещё не
+    // существует на старте, precheck честно падает на несуществующем cwd,
+    // что и требуется — критерий ещё не должен проходить).
+    const precheckCwd = t.type === 'tool' ? path.join(TOOLS_DIR, t.tool_name) : workspaceDir;
+    const pre = await precheck(criteria, precheckCwd, { sandbox });
     if (pre.pass) {
       const regenerated = await regenerateCriteria({ title: t.title, spec: t.spec, oldCriteria: criteria, runId });
       if (regenerated) criteria = regenerated;
@@ -139,13 +158,20 @@ export async function runArchitect({
     const dependTitle = typeof t.depends_on_title === 'string' ? t.depends_on_title : null;
     const blockedById = dependTitle ? (titleToId.get(dependTitle) || null) : null;
 
+    // tool_run: harness строит канонический JSON-вызов сам из tool_name/
+    // tool_args, не доверяя модели точный формат spec (§26.2 «Использование»).
+    const spec = t.type === 'tool_run'
+      ? JSON.stringify({ tool: t.tool_name, args: Array.isArray(t.tool_args) ? t.tool_args.map(String) : [] })
+      : t.spec;
+
     const id = addTask({
       project_id: projectId,
       title: t.title,
-      spec: t.spec,
+      spec,
       criteria: JSON.stringify(criteria),
       role: 'coder',
-      type: 'project',
+      type: t.type,
+      tool_name: (t.type === 'tool' || t.type === 'tool_run') ? t.tool_name : undefined,
       touches_files: Array.isArray(t.touches_files) ? t.touches_files : [],
       blocked_by_task_id: blockedById,
     });
@@ -161,11 +187,27 @@ export async function runArchitect({
   // побочному эффекту строго последовательной однопоточной обработки очереди
   // (claimNext всегда берёт самую старую pending-задачу), что перестанет
   // быть истиной с параллельными воркерами (Фаза 6).
+  //
+  // Кузница (§26, П§4): type=tool ИСКЛЮЧЁН из regression_of, хотя и остаётся
+  // в deps (порядок — регрессия всё равно ждёт, что инструмент собран).
+  // Регрессия всегда исполняется с ОДНИМ cwd=workspace продукта (checkRunner
+  // не умеет разные cwd для разных под-критериев внутри одного regression_of)
+  // — критерий сборки инструмента написан для cwd=tools/<name>/ и упадёт
+  // технически (Cannot find module run.js), не содержательно, при повторе
+  // относительно workspace. Сборка уже верифицирована один раз при
+  // регистрации (§26.2) — для регрессии продукта важно, что PRODUCT
+  // по-прежнему корректно ИСПОЛЬЗУЕТ инструмент (tool_run + потребитель
+  // результата), не что сам инструмент всё ещё собирается с нуля.
+  const regressionOfIds = plan.tasks
+    .map((t, i) => ({ type: t.type, id: createdIds[i] }))
+    .filter(({ type }) => type !== 'tool')
+    .map(({ id }) => id);
+
   const regressionId = addTask({
     project_id: projectId,
     title: 'Регрессия: повтор критериев дерева',
-    spec: 'Автоматическая регрессия — повторный прогон критериев всех задач этого дерева, без новой генерации кода.',
-    criteria: JSON.stringify({ regression_of: createdIds }),
+    spec: 'Автоматическая регрессия — повторный прогон критериев всех задач этого дерева (кроме сборки инструментов — см. §26), без новой генерации кода.',
+    criteria: JSON.stringify({ regression_of: regressionOfIds }),
     role: 'coder',
     type: 'regression',
     deps: createdIds,

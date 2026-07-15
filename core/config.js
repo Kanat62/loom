@@ -69,6 +69,10 @@ export const WORKSPACE = path.join(ROOT, MOCK_FLAG ? 'workspace.mock' : 'workspa
 export const PROMPTS_DIR = path.join(ROOT, 'prompts');
 export const TMP_DIR = path.join(ROOT, '.loom-tmp');
 export const HISTORY_DIR = path.join(ROOT, '.history');
+// Кузница инструментов (§26, П§4 DEV_GUIDE part2) — переживает проекты,
+// поэтому в корне LOOM, НЕ в workspace; та же MOCK-изоляция, что у
+// journal/skills/workspace (баг №1 первого живого прогона).
+export const TOOLS_DIR = path.join(ROOT, MOCK_FLAG ? 'tools.mock' : 'tools');
 
 export const JOURNAL_DB_PATH = path.join(ROOT, MOCK_FLAG ? 'journal.mock.db' : 'journal.db');
 export const SKILLS_DB_PATH = path.join(ROOT, MOCK_FLAG ? 'skills.mock.db' : 'skills.db');

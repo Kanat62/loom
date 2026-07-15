@@ -1,0 +1,10 @@
+{
+  "title": "Инструмент word-count: считает слова в файле",
+  "spec": "Собери tools/word-count/run.js — первый позиционный аргумент: путь входного текстового файла, второй: путь выходного JSON-файла. Пишет {\"count\":N} (N — число слов, разделённых пробельными символами) в outFile и завершается кодом 0. Плюс обязательный tool.json ({\"name\":\"word-count\",\"version\":1,\"description\":\"считает слова в текстовом файле\",\"args\":[\"inFile\",\"outFile\"],\"network\":\"none\",\"timeout_ms\":10000}). Только stdlib Node 22, npm-зависимости запрещены.",
+  "criteria": {
+    "cmd": "node -e \"const fs=require('fs');const{execFileSync}=require('child_process');let out;try{out=execFileSync('node',['run.js','../../evals/fixtures/word-count-sample.txt','out.json']);}catch(e){console.error('FAIL: run.js завершился с ошибкой: '+e.message);process.exit(1);}const r=JSON.parse(fs.readFileSync('out.json','utf8'));if(r.count===9){console.log('PASS count=9')}else{console.error('FAIL: ожидали count=9 (fixture из 9 слов), получили '+JSON.stringify(r));process.exit(1)}\""
+  },
+  "role": "coder",
+  "type": "tool",
+  "tool_name": "word-count"
+}

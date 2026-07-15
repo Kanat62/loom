@@ -286,3 +286,53 @@ npx playwright install chromium
    ветке `git push origin HEAD`, не пытаться создать репозиторий второй раз.
 6. Уберите `GITHUB_PUSH=1` из `.env`, если не хотите публиковать дальнейшие
    учебные прогоны автоматически.
+
+## Ф5.7. Кузница инструментов — word-count (П§4)
+
+MOCK-сценарий (§26.6, детерминированный, без модели) уже зелёный —
+`npm run mock`, ищите блок `=== Кузница инструментов: word-count (§26.6) ===`.
+Здесь — тот же цикл, но со сборкой РЕАЛЬНОЙ моделью (Sonnet, дёшево:
+1-2 попытки на маленький скрипт).
+
+**[РЕАЛЬНЫЙ ПРОГОН] Шаг 1 — сборка инструмента:**
+```bash
+npm run cli -- --file evals/manual/word-count-tool-task.json
+```
+Ожидание: `[cli] задача создана: task_...`, кодер (реальный Sonnet) пишет
+`tools/word-count/run.js` + `tools/word-count/tool.json`, тестер прогоняет
+критерий на `evals/fixtures/word-count-sample.txt` (9 слов). В конце
+`[cli] финальный статус задачи ...: done`.
+
+Проверка регистрации:
+```bash
+node --env-file=.env --no-warnings -e "
+import('./core/tools.js').then(t => console.log(t.listTools()));
+"
+```
+Ожидание: одна запись `{name:'word-count', version:1, ..., created_by_task:'task_...'}`.
+
+**[РЕАЛЬНЫЙ ПРОГОН] Шаг 2 — использование (tool_run):**
+```bash
+echo "one two three four five" > workspace/demo.txt
+npm run cli -- --file evals/manual/word-count-tool-run-task.json
+```
+Ожидание: кодер НЕ вызывается (`type=tool_run` — та же ветка «пропустить
+кодера», что у регрессии), в логе `[coordinator] tool_run "word-count" →
+exit=0 (...)`, в `workspace/result.json` — `{"count":5}`, финальный статус
+`done`.
+
+Проверка событий (§14):
+```bash
+node --env-file=.env --no-warnings -e "
+import('./core/journal.js').then(j => {
+  console.log(j.listEvents({ type: 'tool_run' }));
+  console.log(j.listEvents({ type: 'tool_registered' }));
+});
+"
+```
+Ожидание: обе выборки непустые, у `tool_run` — `payload.name==='word-count'`,
+реальный `duration_ms`.
+
+**Сетевой инструмент** (§10-этика, robots.txt) — за рамками этого
+дешёвого прогона: реальный сетевой инструмент собирается по делу в Фазе 7
+(researcher, П§6.4 — выпускной экзамен), не здесь отдельным упражнением.

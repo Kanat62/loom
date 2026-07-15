@@ -1,0 +1,10 @@
+{
+  "title": "Запуск word-count на demo-файле продукта",
+  "spec": "{\"tool\":\"word-count\",\"args\":[\"demo.txt\",\"result.json\"]}",
+  "criteria": {
+    "cmd": "node -e \"const fs=require('fs');if(!fs.existsSync('result.json')){console.error('FAIL: result.json не создан');process.exit(1)}const r=JSON.parse(fs.readFileSync('result.json','utf8'));console.log('PASS result.json='+JSON.stringify(r))\""
+  },
+  "role": "coder",
+  "type": "tool_run",
+  "tool_name": "word-count"
+}

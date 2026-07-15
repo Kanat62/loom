@@ -26,6 +26,8 @@ function usage() {
     '  npm run cli -- "текст задачи"',
     '  npm run cli -- --file task.json',
     '  npm run cli -- --title T --spec S --criteria \'{"cmd":"node -e \\"...\\""}\'',
+    '  npm run cli -- --type tool --tool-name X --title T --spec S --criteria \'{"cmd":"..."}\'   (§26 Кузница — ручная сборка/переиспользование инструмента)',
+    '  npm run cli -- --type tool_run --tool-name X --title T --spec \'{"tool":"X","args":["a","b"]}\' --criteria \'{"cmd":"..."}\'',
   ].join('\n');
 }
 
@@ -43,6 +45,9 @@ async function main() {
       criteria: args.criteria,
       role: args.role || 'coder',
       type: args.type || 'project',
+      // §26 Кузница: --tool-name обязателен харнессом для type=tool/tool_run
+      // (coordinator.js читает task.tool_name, не парсит его из title/spec).
+      tool_name: args['tool-name'] || undefined,
       budget_usd: args.budget ? Number(args.budget) : undefined,
     };
   } else if (args._.length) {

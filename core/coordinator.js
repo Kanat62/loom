@@ -16,8 +16,9 @@ import { runCoder, clearEyesState } from '../agents/coder.js';
 import { runTester } from '../agents/tester.js';
 import { runSkillWriter } from '../agents/skill.js';
 import { isDockerAvailable, buildWorkspaceImage } from './docker.js';
-import { WORKSPACE, MAX_ATTEMPTS, ROOT } from './config.js';
+import { WORKSPACE, TOOLS_DIR, MAX_ATTEMPTS, ROOT } from './config.js';
 import { progress } from './io.js';
+import { registerTool, runTool, listTools } from './tools.js';
 
 function git(args, cwd) {
   try {
@@ -103,6 +104,48 @@ function ensureWorkspaceGit(workspaceDir) {
 }
 
 /**
+ * Кузница (§26.4): tools/ — СОБСТВЕННЫЙ git-репозиторий, отдельный от
+ * репозитория LOOM И от workspace продукта. tools/ уже в .gitignore
+ * LOOM'а (шрам 5, gitGuard спокоен — агентский код физически не попадает
+ * в репозиторий машины), история версионируется здесь. Тот же
+ * package.json-фикс, что у workspace (ensureWorkspacePackageJson) — без
+ * поля "type", иначе Node трактовал бы run.js-скрипты как ESM из-за
+ * корневого package.json LOOM (тот же баг, что нашли в Фазе 1).
+ */
+function ensureToolsGit() {
+  fs.mkdirSync(TOOLS_DIR, { recursive: true });
+  const pkgPath = path.join(TOOLS_DIR, 'package.json');
+  if (!fs.existsSync(pkgPath)) {
+    fs.writeFileSync(pkgPath, JSON.stringify({ name: 'loom-tools', private: true }, null, 2) + '\n', 'utf8');
+  }
+  if (!fs.existsSync(path.join(TOOLS_DIR, '.git'))) {
+    git(['init', '-q'], TOOLS_DIR);
+    git(['config', 'user.email', 'loom@local'], TOOLS_DIR);
+    git(['config', 'user.name', 'LOOM coder'], TOOLS_DIR);
+  }
+}
+
+/** tool.json — обязателен по контракту §26.1; отсутствие/битый JSON = брак, не регистрируем. */
+function readToolManifest(toolRoot) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(toolRoot, 'tool.json'), 'utf8'));
+    if (typeof manifest.name === 'string' && manifest.name.trim() && typeof manifest.description === 'string') {
+      return manifest;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Реестр в контекст кодера (не только архитектора) — reuse-first виден на каждой попытке сборки. */
+function toolRegistryContext() {
+  const tools = listTools();
+  if (!tools.length) return '(пока нет ни одного инструмента)';
+  return tools.map((t) => `- ${t.name} (v${t.version}): ${t.description}`).join('\n');
+}
+
+/**
  * Auto-commit safety net (шрам 4, §7): в варианте А кодер вообще не вызывает
  * git сам (нет инструментов) — харнесс коммитит принудительно и безусловно
  * после каждого хода, так что «забыть закоммитить» структурно невозможно.
@@ -153,7 +196,16 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
   if (!task) return null;
 
   const runId = sharedRunId || newRunId();
-  ensureWorkspaceGit(workspaceDir);
+  // Кузница (§26.2, П§4): type='tool' пишет в tools/<tool_name>/, НЕ в
+  // workspace продукта — замок пути (isPathInsideWorkspace) действует
+  // относительно ЭТОГО корня, тот же механизм, другой base (runCoder
+  // принимает workspaceDir как параметр — сигнатуру менять не пришлось).
+  const isTool = task.type === 'tool';
+  const isToolRun = task.type === 'tool_run';
+  const effectiveRoot = isTool ? path.join(TOOLS_DIR, task.tool_name || '') : workspaceDir;
+
+  if (isTool) ensureToolsGit();
+  else ensureWorkspaceGit(workspaceDir);
 
   logEvent({
     run_id: runId, task_id: task.id, type: 'status', agent: 'coordinator',
@@ -173,12 +225,35 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
   incrementAttempts(task.id);
   const task2 = getTask(task.id);
 
-  progress(`[coordinator] "${task2.title}" — попытка ${task2.attempts}/${MAX_ATTEMPTS}: ${task2.type === 'regression' ? 'регрессия, пропускаю кодера' : 'кодер работает...'}`);
+  // Регрессия (§8.9, шрам 31) И tool_run (§26.2 «Использование») — та же
+  // ветка «пропустить кодера»: писать нечего, весь смысл в исполнении
+  // (tester для регрессии, runTool+tester для tool_run).
+  const skipCoder = task2.type === 'regression' || isToolRun;
+  progress(`[coordinator] "${task2.title}" — попытка ${task2.attempts}/${MAX_ATTEMPTS}: ${skipCoder ? `${task2.type}, пропускаю кодера` : 'кодер работает...'}`);
 
-  // Регрессия (§8.9, шрам 31): ТОЛЬКО повтор существующих критериев —
-  // кодер не вызывается, писать нечего, весь смысл в tester-проходе.
-  if (task2.type !== 'regression') {
-    const coderResult = await runCoder({ task: task2, workspaceDir, runId });
+  let toolRunPrefix = '';
+
+  if (isToolRun) {
+    // task.spec = JSON {"tool":"name","args":[...]} (§26.2). Провал парсинга
+    // — брак архитектора/researcher-харнесса, честный retry, не exception.
+    let toolCall;
+    try { toolCall = JSON.parse(task2.spec || '{}'); } catch { toolCall = {}; }
+    if (typeof toolCall.tool !== 'string' || !toolCall.tool.trim()) {
+      return handleAttemptFailure(task, runId, 'FAIL: tool_run.spec обязан быть JSON {"tool":"name","args":[...]}, поле tool отсутствует', role);
+    }
+    // eslint-disable-next-line no-await-in-loop
+    const runResult = await runTool(toolCall.tool, Array.isArray(toolCall.args) ? toolCall.args : [], {
+      cwd: workspaceDir, runId, taskId: task2.id,
+    });
+    progress(`[coordinator] tool_run "${toolCall.tool}" → exit=${runResult.code} (${runResult.duration_ms}мс)`);
+    toolRunPrefix = `[tool_run] ${toolCall.tool} exit=${runResult.code} (${runResult.duration_ms}мс)\nSTDOUT: ${runResult.stdout}\nSTDERR: ${runResult.stderr}\n---\n`;
+  } else if (!skipCoder) {
+    // Кузница: реестр в контексте кодера (не только архитектора, §26.2 п.1
+    // reuse-first) — виден на КАЖДОЙ попытке сборки, свежий список.
+    const codeTask = isTool
+      ? { ...task2, spec: `${task2.spec}\n\n## Существующие инструменты (reuse-first — переиспользуй, не дублируй)\n${toolRegistryContext()}` }
+      : task2;
+    const coderResult = await runCoder({ task: codeTask, workspaceDir: effectiveRoot, runId });
     addSpent(task.id, sumRunCost(runId, task.id));
 
     if (coderResult.type === 'question') {
@@ -188,8 +263,8 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
       return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'question' };
     }
     if (coderResult.type === 'error') {
-      // Замок пути (§12.1) — попытка записи вне workspace: отдельное
-      // событие для аудита SQL-запросом (§14), не только текст в feedback.
+      // Замок пути (§12.1) — попытка записи вне workspace/tools-корня:
+      // отдельное событие для аудита SQL-запросом (§14), не только текст в feedback.
       if (/замком пути/.test(coderResult.error)) {
         logEvent({
           run_id: runId, task_id: task.id, type: 'status', agent: 'coordinator',
@@ -201,29 +276,59 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
     // Печать рядом с уже существующим usage-событием кодера (logEvent внутри
     // chat(), вызванного runCoder чуть выше).
     progress(`[coder] задача "${task2.title}" попытка ${task2.attempts} → файлы: ${coderResult.written.join(', ') || '(нет)'}`);
-    autoCommit(workspaceDir, `loom: coder attempt ${task2.attempts} on ${task.id} (${coderResult.written.length} файлов)`);
+    if (isTool) {
+      autoCommit(TOOLS_DIR, `loom-tool: coder attempt ${task2.attempts} on ${task.id} (${task2.tool_name})`);
+    } else {
+      autoCommit(workspaceDir, `loom: coder attempt ${task2.attempts} on ${task.id} (${coderResult.written.length} файлов)`);
+    }
   }
 
-  const sandbox = ensureDockerSandbox(workspaceDir) ? 'docker' : 'local';
-  const testResult = await runTester({ task: task2, workspaceDir, sandbox });
+  // Критерий tool-сборки обязан РЕАЛЬНО исполнить инструмент (§8.5, §26.2) —
+  // cwd = корень инструмента, тот же контракт, что боевой прогон; tool_run и
+  // всё остальное — cwd = workspace продукта, как раньше.
+  const testCwd = isTool ? effectiveRoot : workspaceDir;
+  const sandbox = ensureDockerSandbox(testCwd) ? 'docker' : 'local';
+  const testResult = await runTester({ task: task2, workspaceDir: testCwd, sandbox });
+  const report = (toolRunPrefix + testResult.report).slice(0, 1000);
   // Печать рядом с уже существующим test_result-событием ниже — тестер сам
   // LLM не вызывает (§9), это единственная точка, где известен вердикт.
-  progress(`[tester] критерий "${task2.title}" → ${testResult.pass ? 'PASS' : 'FAIL'} (${testResult.report.slice(0, 120).replace(/\n/g, ' ')})`);
+  progress(`[tester] критерий "${task2.title}" → ${testResult.pass ? 'PASS' : 'FAIL'} (${report.slice(0, 120).replace(/\n/g, ' ')})`);
   logEvent({
     run_id: runId, task_id: task.id, type: 'test_result', agent: 'tester',
-    payload: { pass: testResult.pass, report: testResult.report },
+    payload: { pass: testResult.pass, report },
   });
 
   if (testResult.pass) {
-    setStatus(task.id, 'done', { feedback: testResult.report });
-    autoCommit(workspaceDir, `loom: done ${task.id}`);
+    if (isTool) {
+      // tool.json обязателен по контракту (§26.1) — отсутствие/битый JSON
+      // не регистрируем даже при зелёном критерии (брак архитектора/кодера,
+      // доверие построено на недоверии, не на слове тестера).
+      const manifest = readToolManifest(effectiveRoot);
+      if (!manifest) {
+        return handleAttemptFailure(task, runId, `${report}\nFAIL: критерий прошёл, но tool.json отсутствует или битый (обязателен §26.1) — инструмент НЕ зарегистрирован`.slice(0, 1000), role);
+      }
+      const registered = registerTool({
+        name: manifest.name,
+        description: manifest.description,
+        entry: manifest.entry || 'run.js',
+        network: manifest.network || 'none',
+        timeout_ms: manifest.timeout_ms || 60000,
+        created_by_task: task.id,
+        runId,
+      });
+      autoCommit(TOOLS_DIR, `loom-tool: ${registered.name} v${registered.version} (${task.id})`);
+      progress(`[coordinator] инструмент "${registered.name}" зарегистрирован (v${registered.version})`);
+    } else {
+      autoCommit(workspaceDir, `loom: done ${task.id}`);
+    }
+    setStatus(task.id, 'done', { feedback: report });
     clearEyesState(task.id);
     await writeSkillSafely(task.id, runId);
     progress(`[coordinator] задача done, осталось ${remainingCount(role)}`);
     return { task: getTask(task.id), verdict: 'done' };
   }
 
-  return handleAttemptFailure(task, runId, testResult.report, role);
+  return handleAttemptFailure(task, runId, report, role);
 }
 
 /** skill_writer — механически после done (§4); сбой этой роли не должен ронять координатор. */
