@@ -5,6 +5,7 @@
 // 15); мусорный вход не превращается в бриф (шрам 16).
 import { callAgent } from '../core/engine.js';
 import { MAX_INTERVIEW_TURNS } from '../core/config.js';
+import { progress } from '../core/io.js';
 
 const PROTOCOL_FILES = {
   wish: 'advisor.wish.md',
@@ -127,12 +128,20 @@ async function forceFinalize(protocol, history) {
   };
 }
 
+// Печать рядом с уже существующим usage-событием (logEvent внутри chat(),
+// вызванного callAgent из runAdvisorStep чуть выше по стеку) — не новая
+// система логирования, просто озвучивает уже принятое решение шага.
+function progressForStep(step) {
+  progress(step.type === 'ready' ? '[advisor] бриф готов' : '[advisor] интервью — уточняющий вопрос клиенту');
+}
+
 export async function startIntake({
   protocol, initialText, runId, rootSpec, engineeringDefaults,
 }) {
   const existingContext = { rootSpec, engineeringDefaults };
   const history = [{ role: 'client', text: initialText }];
   const step = await runAdvisorStep({ protocol, history, runId, existingContext });
+  progressForStep(step);
   if (step.type === 'ask') history.push({ role: 'advisor_ask', text: step.question });
   return { history, step };
 }
@@ -141,11 +150,14 @@ export async function continueIntake({
   protocol, history, clientReply, runId, turnCount = 1, rootSpec, engineeringDefaults,
 }) {
   if (turnCount >= MAX_INTERVIEW_TURNS) {
-    return { history, step: await forceFinalize(protocol, history) };
+    const step = await forceFinalize(protocol, history);
+    progressForStep(step);
+    return { history, step };
   }
   const existingContext = { rootSpec, engineeringDefaults };
   const newHistory = [...history, { role: 'client', text: clientReply }];
   const step = await runAdvisorStep({ protocol, history: newHistory, runId, existingContext });
+  progressForStep(step);
   if (step.type === 'ask') newHistory.push({ role: 'advisor_ask', text: step.question });
   return { history: newHistory, step };
 }
@@ -156,6 +168,7 @@ export async function reviseDecisions({
   const existingContext = { rootSpec, engineeringDefaults };
   const newHistory = [...history, { role: 'client_correction', text: correctionText }];
   const step = await runAdvisorStep({ protocol, history: newHistory, runId, existingContext });
+  progressForStep(step);
   return { history: newHistory, step };
 }
 

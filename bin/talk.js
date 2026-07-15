@@ -16,10 +16,15 @@ import { runLivein } from '../agents/livein.js';
 import { runCoordinatorLoop } from '../core/coordinator.js';
 import {
   addTask, getTask, listTasks, releaseStuck, newRunId, setRootSpec, getRootSpec,
+  listEvents, listEventsSince,
 } from '../core/journal.js';
 import { WORKSPACE, HISTORY_DIR } from '../core/config.js';
 
 const PROJECT_PROTOCOLS = new Set(['wish', 'problem', 'spec']);
+// Момент старта сеанса — итог "за сеанс" (/status, /exit) считается по всем
+// events с created_at позже этой отметки, не завязан на конкретный run_id
+// (за сеанс их обычно несколько: у каждого запроса свой).
+const SESSION_STARTED_AT = Date.now();
 
 function backupWorkspaceHistory(label) {
   if (!fs.existsSync(WORKSPACE)) return;
@@ -41,6 +46,60 @@ function boardSummaryText(taskIds) {
   }).join('\n');
 }
 
+/**
+ * Итог по токенам (§14: usage уже пишется в events на каждый вызов шлюза —
+ * это просто SQL-агрегация уже существующих данных, не новый учёт стоимости;
+ * $ берётся из events.cost_usd, который gateway.js уже посчитал по условным
+ * ценам тиров из config.js, когда claude-cli не вернул total_cost_usd сам).
+ */
+function formatTokenSummary(events, title) {
+  const usage = events.filter((e) => e.type === 'usage');
+  if (!usage.length) return `\n--- ${title} ---\n(вызовов модели не было)`;
+
+  const byAgent = new Map();
+  for (const e of usage) {
+    const agent = e.agent || '(неизвестно)';
+    let cacheRead = 0;
+    try { cacheRead = JSON.parse(e.payload || '{}').cache_read || 0; } catch { /* мок-события без payload.cache_read */ }
+    const row = byAgent.get(agent) || {
+      calls: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cost: 0,
+    };
+    row.calls += 1;
+    row.tokensIn += e.tokens_in || 0;
+    row.tokensOut += e.tokens_out || 0;
+    row.cacheRead += cacheRead;
+    row.cost += e.cost_usd || 0;
+    byAgent.set(agent, row);
+  }
+
+  const total = {
+    calls: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cost: 0,
+  };
+  const col = (v, w) => String(v).padStart(w);
+  const lines = [
+    `\n--- ${title} ---`,
+    `${'агент'.padEnd(13)} | ${'вызовов'.padStart(7)} | ${'tokens_in'.padStart(9)} | ${'tokens_out'.padStart(10)} | ${'cache_read'.padStart(10)} | ${'$'.padStart(8)}`,
+  ];
+  for (const [agent, row] of byAgent) {
+    total.calls += row.calls;
+    total.tokensIn += row.tokensIn;
+    total.tokensOut += row.tokensOut;
+    total.cacheRead += row.cacheRead;
+    total.cost += row.cost;
+    lines.push(`${agent.padEnd(13)} | ${col(row.calls, 7)} | ${col(row.tokensIn, 9)} | ${col(row.tokensOut, 10)} | ${col(row.cacheRead, 10)} | ${col(row.cost.toFixed(4), 8)}`);
+  }
+  lines.push(`${'ИТОГО'.padEnd(13)} | ${col(total.calls, 7)} | ${col(total.tokensIn, 9)} | ${col(total.tokensOut, 10)} | ${col(total.cacheRead, 10)} | ${col(total.cost.toFixed(4), 8)}`);
+  return lines.join('\n');
+}
+
+function printRunTokenSummary(runId) {
+  console.log(formatTokenSummary(listEvents({ run_id: runId }), `Токены за запрос (run_id=${runId})`));
+}
+
+function printSessionTokenSummary() {
+  console.log(formatTokenSummary(listEventsSince(SESSION_STARTED_AT), 'Токены за сеанс (итого)'));
+}
+
 function printStatus() {
   const tasks = listTasks({});
   const byStatus = {};
@@ -52,6 +111,7 @@ function printStatus() {
       console.log(`  ⚠ ${t.id} "${t.title}" — ${t.question ? `вопрос: ${t.question}` : t.feedback}`);
     }
   }
+  printSessionTokenSummary();
 }
 
 /**
@@ -117,18 +177,20 @@ async function runProjectFlow(protocol, initialText, runId) {
   });
   if (!architectResult.ok) {
     console.log(`\nАрхитектор не смог построить план: ${architectResult.error}`);
+    printRunTokenSummary(runId);
     return;
   }
   console.log(`\nСоздано задач: ${architectResult.taskIds.length} + регрессия. Пакеты: ${architectResult.packages.join(', ') || '(нет)'}`);
   architectResult.precheckLog.forEach((l) => console.log(`  ${l}`));
 
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
   printStatus();
 
   const treeIds = [...architectResult.taskIds, architectResult.regressionId];
   const allDone = treeIds.every((id) => getTask(id)?.status === 'done');
   if (!allDone) {
     console.log('\nДерево не полностью зелёное — обживание и отчёт консультанта пропущены (см. /status, /resume).');
+    printRunTokenSummary(runId);
     return;
   }
 
@@ -147,7 +209,7 @@ async function runProjectFlow(protocol, initialText, runId) {
     console.log(`\n[live_in] ${liveinSummary}`);
   } else {
     console.log(`\n[live_in] найдено шероховатостей: ${liveinResult.roughSpotsFound}, создано polish-задач: ${liveinResult.taskIds.length}`);
-    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
     liveinSummary = `найдено и обработано шероховатостей: ${liveinResult.roughSpotsFound}\n${boardSummaryText(liveinResult.taskIds)}`;
     printStatus();
   }
@@ -159,32 +221,46 @@ async function runProjectFlow(protocol, initialText, runId) {
     problem: brief.problem, boardSummary: boardSummaryText(allTreeIds), liveinSummary, runId,
   });
   console.log(report);
+  printRunTokenSummary(runId);
 }
 
-async function runTweakFlow(text, criteria, runId) {
+async function runTweakFlow(text, criteria, runId, verification = false) {
   backupWorkspaceHistory('tweak');
+  // Verification-вход (шрам: «проверь фильтр» отроутилось в problem, советник
+  // спросил у клиента то, что сам обязан был установить прогоном критериев):
+  // criteria здесь — {regression_of:[...]} на УЖЕ существующие задачи, type
+  // 'regression' — coordinator.js пропускает кодера для таких задач (§8.9),
+  // сразу идёт в tester. Никакой новой генерации кода/проверки, ноль вопросов
+  // клиенту до отчёта.
   const id = addTask({
-    title: text.slice(0, 80), spec: text, criteria: JSON.stringify(criteria), role: 'coder', type: 'tweak',
+    title: text.slice(0, 80), spec: text, criteria: JSON.stringify(criteria), role: 'coder',
+    type: verification ? 'regression' : 'tweak',
   });
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
   const finalTask = getTask(id);
 
-  if (finalTask.status === 'blocked_needs_human') {
+  if (finalTask.status === 'blocked_needs_human' && finalTask.type !== 'regression') {
     // Эскалация встроена (§1): tweak, оказавшийся сложнее, автоматически
     // перезапускается маршрутом project (полный цикл с советником/архитектором).
+    // Verification-регрессия сюда не попадает: провал существующих критериев
+    // — это результат проверки, который нужно ДОЛОЖИТЬ, а не повод затевать
+    // новый цикл советника. runId тот же — эскалированный project допечатает
+    // токены за ВЕСЬ запрос (tweak-попытка + полный цикл) сам, повторно
+    // печатать здесь не нужно.
     console.log('\nTweak оказался сложнее ожидаемого — эскалирую на полный цикл (project).');
     await runProjectFlow('wish', text, runId);
     return;
   }
   console.log(`\nTweak завершён: ${finalTask.status}`);
   if (finalTask.feedback) console.log(finalTask.feedback);
+  printRunTokenSummary(runId);
 }
 
 async function handleLine(rawLine) {
   const line = sanitizeLine(rawLine);
   if (!line) return;
 
-  if (line === '/exit') { closeInput(); process.exit(0); }
+  if (line === '/exit') { printSessionTokenSummary(); closeInput(); process.exit(0); }
   if (line === '/status') { printStatus(); return; }
   if (line === '/resume') {
     const n = releaseStuck();
@@ -202,8 +278,9 @@ async function handleLine(rawLine) {
 
   const runId = newRunId();
   const workspaceListing = listWorkspaceFileNames(WORKSPACE);
+  // [router]-строка прогресса печатается внутри routeRequest() самой (agents/
+  // router.js) — одинаково видна и здесь, и в npm run mock, который зовёт её напрямую.
   const routed = await routeRequest({ text: line, workspaceFiles: workspaceListing, runId });
-  console.log(`\n[router] route=${routed.route} (${routed.reason})`);
 
   if (routed.route === 'question') {
     const rootSpec = getRootSpec('default');
@@ -215,7 +292,7 @@ async function handleLine(rawLine) {
   }
 
   if (routed.route === 'tweak') {
-    await runTweakFlow(line, routed.criteria, runId);
+    await runTweakFlow(line, routed.criteria, runId, routed.verification === true);
     return;
   }
 
