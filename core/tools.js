@@ -58,10 +58,72 @@ export function listTools() {
   return db().prepare('SELECT * FROM tools ORDER BY name ASC').all();
 }
 
-/** findTools(query) — LIKE по name+description (FTS5 — Фаза 8, П§7). */
+// Фаза 8 (§4, П§7): тот же порог/деградация, что core/skills.js — FTS5
+// только после 100+ инструментов; поддержка FTS5 пробуется один раз за
+// процесс и кэшируется, count пересчитывается на каждый search (дёшево,
+// таблица маленькая) — порог честно ловится в середине живого процесса.
+// `tools.name` — TEXT PRIMARY KEY, но неявный rowid всё равно есть (таблица
+// не WITHOUT ROWID) — used as content_rowid, как и полагается
+// external-content FTS5.
+let ftsSupported = null;
+
+function probeFtsSupport(d) {
+  if (ftsSupported !== null) return ftsSupported;
+  try {
+    d.exec("CREATE VIRTUAL TABLE IF NOT EXISTS tools_fts USING fts5(name, description, content='tools', content_rowid='rowid')");
+    ftsSupported = true;
+  } catch {
+    ftsSupported = false; // сборка sqlite без FTS5 — деградация в LIKE, не сбой
+  }
+  return ftsSupported;
+}
+
+function ensureFts() {
+  const d = db();
+  const { n } = d.prepare('SELECT COUNT(*) AS n FROM tools').get();
+  if (n < 100) return false;
+  if (!probeFtsSupport(d)) return false;
+  // INSERT OR IGNORE — см. подробное объяснение в core/skills.js:ensureFts
+  // (тот же баг: self-referential "WHERE rowid NOT IN (SELECT ... FROM
+  // tools_fts)" молча портит FTS5-индекс, найдено evals/fts.js).
+  d.exec(`
+    INSERT OR IGNORE INTO tools_fts(rowid, name, description) SELECT rowid, name, description FROM tools;
+    CREATE TRIGGER IF NOT EXISTS tools_ai AFTER INSERT ON tools BEGIN
+      INSERT INTO tools_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description);
+    END;
+    CREATE TRIGGER IF NOT EXISTS tools_ad AFTER DELETE ON tools BEGIN
+      INSERT INTO tools_fts(tools_fts, rowid, name, description) VALUES('delete', old.rowid, old.name, old.description);
+    END;
+    CREATE TRIGGER IF NOT EXISTS tools_au AFTER UPDATE ON tools BEGIN
+      INSERT INTO tools_fts(tools_fts, rowid, name, description) VALUES('delete', old.rowid, old.name, old.description);
+      INSERT INTO tools_fts(rowid, name, description) VALUES (new.rowid, new.name, new.description);
+    END;
+  `);
+  return true;
+}
+
+/** findTools(query) — FTS5 при наличии (100+ записей и сборка её поддерживает), иначе LIKE (§4, П§7). */
 export function findTools(query) {
-  const needle = `%${(query || '').trim()}%`;
+  const q = (query || '').trim();
+  if (!q) return [];
+  if (ensureFts()) {
+    try {
+      const phrase = `"${q.replace(/"/g, '""')}"`;
+      return db().prepare(`
+        SELECT tools.* FROM tools_fts JOIN tools ON tools.rowid = tools_fts.rowid
+        WHERE tools_fts MATCH ? ORDER BY rank
+      `).all(phrase);
+    } catch {
+      // конкретный запрос не разобрался FTS-движком — падаем на LIKE ниже
+    }
+  }
+  const needle = `%${q}%`;
   return db().prepare('SELECT * FROM tools WHERE name LIKE ? OR description LIKE ? ORDER BY name ASC').all(needle, needle);
+}
+
+/** Диагностика для evals/fts.js — какой путь поиска сейчас активен (не для продуктового кода). */
+export function _ftsDebugStatus() {
+  return { active: ensureFts(), supported: ftsSupported };
 }
 
 function recordUsage(name) {

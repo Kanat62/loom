@@ -41,7 +41,19 @@ researcher (`agents/researcher.js`, §10) — двузвонковый цикл 
 отчётность, не блокировка); банк эталонных желаний (`evals/bank/*.json` +
 `evals/bank.js`, `npm run bank:mock`/`npm run bank`) и LLM-as-judge
 (`evals/judge.js`, событие `eval_score`, метрика — никогда не ворота) — П§6.
-Остальное — дашборд/FTS5/Telegram/maintenance-минимум (Фаза 8) — не построено.
+**Фаза 8**: FTS5 для skills/tools (порог 100+ записей, `INSERT OR IGNORE`
+backfill — `NOT IN`-вариант молча портит индекс внешне-контентной FTS5-
+таблицы, найдено `evals/fts.js`, фолбэк в LIKE при сборке sqlite без FTS5)
+— П§7 п.1; дашборд `bin/dash.js` (node:http на 127.0.0.1, ноль
+зависимостей, `npm run dash`, три колонки: статусы/детали/чат-с-
+аналитиком, read-only) — П§7 п.2; maintenance-минимум — `type=
+regression_detected` уже маршрутизируется как tweak (без новой ветки
+координатора), `AUTO_MERGES_PER_DAY` — реальный гейт в `drainMergeQueue`
+(events за 24ч) — П§7 п.3; Telegram-вход `bin/telegram.js` (long-poll,
+опционально, `npm run telegram`, включается `TELEGRAM_BOT_TOKEN`,
+намеренно урезан — без researcher/ingest/live_in) — необязательный модуль.
+Полный контур PR→CI→staging→прод (§18) — сознательно за рамками
+v1.0-final.
 
 ## Быстрый старт
 

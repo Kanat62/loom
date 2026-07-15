@@ -28,6 +28,7 @@ function usage() {
     '  npm run cli -- --title T --spec S --criteria \'{"cmd":"node -e \\"...\\""}\'',
     '  npm run cli -- --type tool --tool-name X --title T --spec S --criteria \'{"cmd":"..."}\'   (§26 Кузница — ручная сборка/переиспользование инструмента)',
     '  npm run cli -- --type tool_run --tool-name X --title T --spec \'{"tool":"X","args":["a","b"]}\' --criteria \'{"cmd":"..."}\'',
+    '  npm run cli -- --type regression_detected --title T --spec S --criteria \'{"cmd":"..."}\'   (§18 maintenance-минимум — заводится будущим мониторингом прода; сегодня журнал принимает его, координатор ведёт как обычный tweak, никакой особой ветки)',
   ].join('\n');
 }
 

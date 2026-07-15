@@ -10,9 +10,19 @@ import {
   mergeWorktree, readFileAtRef, resolveConflictFile, commitMerge, abortMerge,
   rebaseWorktreeOntoMain, currentBranch,
 } from './worktrees.js';
-import { setStatus, listTasks, logEvent } from './journal.js';
+import {
+  setStatus, listTasks, listEvents, logEvent,
+} from './journal.js';
 import { progress } from './io.js';
-import { MAX_ATTEMPTS } from './config.js';
+import { MAX_ATTEMPTS, AUTO_MERGES_PER_DAY } from './config.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Maintenance-минимум (§18, П§7 п.3): сколько мёржей уже случилось за последние 24ч. */
+function mergesInLast24h() {
+  const since = Date.now() - DAY_MS;
+  return listEvents({ type: 'merged' }).filter((e) => e.created_at >= since).length;
+}
 
 /**
  * Ищет ЛОКАЛЬНО установленный tsc — НИКОГДА через `npx` без предустановленного
@@ -192,13 +202,22 @@ async function mergeOneTask(task, workspaceDir, { runId, worktreesDir } = {}) {
  * ОДИН workspace физически несовместимы (один .git индекс).
  */
 export async function drainMergeQueue({
-  role = 'coder', workspaceDir, worktreesDir, workerIds = [], runId,
+  role = 'coder', workspaceDir, worktreesDir, workerIds = [], runId, maxPerDay = AUTO_MERGES_PER_DAY,
 } = {}) {
   let processed = 0;
   for (;;) {
     const pending = listTasks({ status: 'merge_pending', role }).sort((a, b) => a.created_at - b.created_at);
     const task = pending[0];
     if (!task) break;
+
+    // Maintenance-минимум (§18): лимит достигнут → оставшиеся merge_pending
+    // ЖДУТ (не failed, не blocked_needs_human) — следующий вызов
+    // drainMergeQueue (следующий цикл координатора, обычно уже завтра)
+    // подберёт их сам, как только окно откроется снова.
+    if (maxPerDay > 0 && mergesInLast24h() >= maxPerDay) {
+      progress(`[merge] rate-limit: ${maxPerDay} автомёржей/сутки исчерпаны — ${pending.length} задач(и) в merge_pending ждут следующего окна (§18 maintenance-минимум).`);
+      break;
+    }
 
     // eslint-disable-next-line no-await-in-loop
     const verdict = await mergeOneTask(task, workspaceDir, { runId, worktreesDir });

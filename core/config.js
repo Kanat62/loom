@@ -81,6 +81,14 @@ export const TOOLS_DIR = path.join(ROOT, MOCK_FLAG ? 'tools.mock' : 'tools');
 export const CODER_WORKERS = Number(process.env.CODER_WORKERS || 1);
 export const WORKTREES_DIR = path.join(ROOT, MOCK_FLAG ? '.worktrees.mock' : '.worktrees');
 
+// Maintenance-минимум (§18 ТЗ v4, П§7 п.3 DEV_GUIDE part2): rate-limit
+// автономных мёржей в сутки — core/merge.js:drainMergeQueue считает events
+// (type='merged') за последние 24ч и останавливает очередь, если лимит
+// исчерпан (оставшиеся merge_pending ждут следующего окна, не отбрасываются).
+// Большое значение по умолчанию — гейт реально enforced, но не мешает
+// обычной разработке/MOCK-параллельности (до нескольких мёржей за прогон).
+export const AUTO_MERGES_PER_DAY = Number(process.env.AUTO_MERGES_PER_DAY || 1000);
+
 export const JOURNAL_DB_PATH = path.join(ROOT, MOCK_FLAG ? 'journal.mock.db' : 'journal.db');
 export const SKILLS_DB_PATH = path.join(ROOT, MOCK_FLAG ? 'skills.mock.db' : 'skills.db');
 

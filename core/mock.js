@@ -1128,6 +1128,183 @@ async function runIngestScenario() {
   console.log('[mock] ingest OK — дыра ТЗ поймана до архитектора, непокрытое требование поймано после архитектора (covers), дерево done.');
 }
 
+// --- Сценарий (§22 Фаза 8, П§7.2): дашборд — node:http на эфемерном порту,
+// --- три ручки (список/детали/чат), ноль реальной сети наружу -------------
+async function runDashboardSmokeScenario() {
+  const { createDashServer } = await import('../bin/dash.js');
+  const { addTask, getTask } = await import('./journal.js');
+
+  const taskId = addTask({
+    title: 'ТЕСТ_ДАШБОРД: демо-задача для смоука',
+    spec: 'демо',
+    criteria: JSON.stringify({ cmd: 'node -e "console.log(\'PASS\')"' }),
+    role: 'coder',
+    type: 'project',
+  });
+
+  const server = createDashServer();
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const home = await fetch(`${base}/`);
+    if (home.status !== 200 || !(home.headers.get('content-type') || '').includes('text/html')) {
+      throw new Error(`dash: GET / ожидали 200 text/html, получили ${home.status} ${home.headers.get('content-type')}`);
+    }
+
+    const tasksRes = await fetch(`${base}/api/tasks`);
+    const tasks = await tasksRes.json();
+    if (!Array.isArray(tasks) || !tasks.some((t) => t.id === taskId)) {
+      throw new Error(`dash: GET /api/tasks не содержит созданную задачу ${taskId}`);
+    }
+
+    const detailRes = await fetch(`${base}/api/task/${encodeURIComponent(taskId)}`);
+    const detail = await detailRes.json();
+    if (detailRes.status !== 200 || !detail.task || detail.task.id !== taskId || !Array.isArray(detail.events)) {
+      throw new Error(`dash: GET /api/task/${taskId} вернул некорректную форму: ${JSON.stringify(detail)}`);
+    }
+
+    const missingRes = await fetch(`${base}/api/task/nonexistent-id`);
+    if (missingRes.status !== 404) {
+      throw new Error(`dash: GET /api/task/<не существует> ожидали 404, получили ${missingRes.status}`);
+    }
+
+    const askRes = await fetch(`${base}/api/ask`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: 'что делает calc.js?' }),
+    });
+    const askData = await askRes.json();
+    if (askRes.status !== 200 || typeof askData.answer !== 'string' || !askData.answer.trim()) {
+      throw new Error(`dash: POST /api/ask вернул пустой/некорректный ответ: ${JSON.stringify(askData)}`);
+    }
+
+    const emptyAskRes = await fetch(`${base}/api/ask`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: '' }),
+    });
+    if (emptyAskRes.status !== 400) {
+      throw new Error(`dash: POST /api/ask с пустым question ожидали 400, получили ${emptyAskRes.status}`);
+    }
+
+    console.log(`[mock] dash: сервер на эфемерном порту ${port}, задача видна в /api/tasks и /api/task/:id, аналитик ответил через /api/ask, 404/400 честные.`);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  if (getTask(taskId).status !== 'pending') {
+    throw new Error('dash: дашборд не должен менять состояние доски (задача сдвинулась со статуса pending)');
+  }
+  console.log('[mock] dash OK — интерфейс наблюдения не тронул состояние доски.');
+}
+
+// --- Сценарий (§18, П§7 п.3): maintenance-минимум — regression_detected --
+// --- маршрутизируется как tweak, AUTO_MERGES_PER_DAY реально ограничивает -
+// --- drainMergeQueue ---------------------------------------------------
+async function runMaintenanceScenario() {
+  const {
+    addTask, getTask, setStatus, logEvent,
+  } = await import('./journal.js');
+  const { runCoordinatorLoop } = await import('./coordinator.js');
+  const { drainMergeQueue } = await import('./merge.js');
+  const { WORKSPACE } = await import('./config.js');
+  const fsMod = await import('node:fs');
+
+  if (fsMod.existsSync(WORKSPACE)) fsMod.rmSync(WORKSPACE, { recursive: true, force: true });
+
+  // regression_detected НЕ упомянут ни в одной специальной ветке
+  // coordinator.js (только 'tool'/'tool_run'/'regression' там особые) —
+  // значит он уже сегодня идёт обычным путём кодера, как tweak, безо всякой
+  // новой ветки харнесса; тест это подтверждает, а не создаёт заново.
+  const id = addTask({
+    // ВАЖНО: title намеренно НЕ содержит подстроку "calc.js" — мок-кодер
+    // матчит по подстрокам в title (см. комментарии выше в этом файле про
+    // isViewportPolish/isPage), а "calc.js" перехватывается веткой isCalc
+    // РАНЬШЕ ветки "Итого" (найдено именно на этом тесте — заголовок с обоими
+    // словами утыкался не в тот сценарий кодера).
+    title: 'regression_detected: prod-мониторинг заметил, что из вывода пропало слово Итого',
+    spec: 'мониторинг обнаружил регрессию в проде (файл вывода — calc.js)',
+    criteria: JSON.stringify({
+      cmd: 'node -e "const fs=require(\'fs\'); const s=fs.readFileSync(\'calc.js\',\'utf8\'); if(s.includes(\'Итого\')){console.log(\'PASS содержит Итого\')}else{console.error(\'FAIL: calc.js не содержит строку Итого\'); process.exit(1)}"',
+    }),
+    role: 'coder',
+    type: 'regression_detected',
+  });
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  const task = getTask(id);
+  if (task.status !== 'done') throw new Error(`maintenance: regression_detected ожидали done (маршрут как у tweak), получили ${task.status}`);
+  console.log('[mock] maintenance: type=regression_detected прошёл обычным путём кодера (как tweak, без особой ветки) — done.');
+
+  // AUTO_MERGES_PER_DAY: гейт проверяется ДО обращения к самой merge_pending
+  // задаче (worktreesDir намеренно фиктивный — до mergeOneTask дело дойти не
+  // должно), поэтому синтетического события 'merged' достаточно, без
+  // повторного полного параллельного прогона (§16-гонка уже отдельно
+  // проверена своим сценарием выше).
+  logEvent({ type: 'merged', task_id: 'synthetic-prior-merge', payload: {} });
+  const pendingId = addTask({
+    title: 'синтетическая merge_pending задача для rate-limit',
+    spec: '',
+    criteria: JSON.stringify({ cmd: 'node -e "console.log(1)"' }),
+    role: 'coder',
+    type: 'project',
+  });
+  setStatus(pendingId, 'claimed');
+  setStatus(pendingId, 'merge_pending');
+
+  const processed = await drainMergeQueue({
+    workspaceDir: WORKSPACE, worktreesDir: '(не используется — гейт срабатывает раньше)', workerIds: [], maxPerDay: 1,
+  });
+  if (processed !== 0) throw new Error(`maintenance: rate-limit должен был остановить очередь ДО обработки, обработано ${processed}`);
+  const stillPending = getTask(pendingId);
+  if (stillPending.status !== 'merge_pending') {
+    throw new Error(`maintenance: задача должна остаться merge_pending при исчерпанном лимите, статус=${stillPending.status}`);
+  }
+  console.log('[mock] maintenance: AUTO_MERGES_PER_DAY=1 (уже 1 мёрж за последние 24ч) → drainMergeQueue не тронул очередь, задача осталась merge_pending.');
+}
+
+// --- Сценарий (П§7, опционально): Telegram-вход — parseUpdate чистой ------
+// --- функцией + handleIncoming с подставным fetch (сеть НЕ трогается) -----
+async function runTelegramScenario() {
+  const { parseUpdate, handleIncoming } = await import('../bin/telegram.js');
+  const { WORKSPACE } = await import('./config.js');
+  const fsMod = await import('node:fs');
+  if (fsMod.existsSync(WORKSPACE)) fsMod.rmSync(WORKSPACE, { recursive: true, force: true });
+
+  const valid = parseUpdate({ update_id: 1, message: { chat: { id: 42 }, text: '  привет  ' } });
+  if (!valid || valid.chatId !== 42 || valid.text !== 'привет') {
+    throw new Error(`telegram: parseUpdate не разобрал валидный апдейт: ${JSON.stringify(valid)}`);
+  }
+  if (parseUpdate({ update_id: 2 }) !== null) throw new Error('telegram: parseUpdate должен вернуть null для апдейта без message');
+  if (parseUpdate({ update_id: 3, message: { chat: { id: 1 }, text: '   ' } }) !== null) {
+    throw new Error('telegram: parseUpdate должен вернуть null для пустого текста');
+  }
+  if (parseUpdate({ update_id: 4, edited_message: { chat: { id: 1 }, text: 'x' } }) !== null) {
+    throw new Error('telegram: parseUpdate должен игнорировать edited_message (это не message)');
+  }
+  console.log('[mock] telegram: parseUpdate — валидный/без message/пустой текст/edited_message — все ветки корректны.');
+
+  // handleIncoming — РЕАЛЬНАЯ маршрутизация через MOCK-модели (тот же
+  // MOCK_HANDLERS, что и весь остальной прогон), подменена ТОЛЬКО сама
+  // сетевая точка выхода (fetch на api.telegram.org) — тот же принцип, что
+  // Кузница/tsc-ворота: мокаем ровно границу с внешним миром, не логику.
+  const sent = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    sent.push({ url: String(url), body: opts?.body ? JSON.parse(opts.body) : null });
+    return { ok: true, json: async () => ({ ok: true, result: [] }) };
+  };
+  try {
+    await handleIncoming({ chatId: 777, text: 'поменяй вывод calc на слово Итого' });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  const sendCalls = sent.filter((s) => s.url.includes('/sendMessage'));
+  if (!sendCalls.length) throw new Error('telegram: handleIncoming (tweak) не отправил ни одного sendMessage');
+  if (sendCalls[0].body.chat_id !== 777) throw new Error(`telegram: sendMessage ушёл не в тот chat_id: ${JSON.stringify(sendCalls[0].body)}`);
+  console.log(`[mock] telegram: handleIncoming (tweak-маршрут, MOCK-модели) → sendMessage в chat 777: "${sendCalls[0].body.text.slice(0, 60)}..."`);
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -1168,6 +1345,9 @@ async function main() {
     ['tweak: router пишет критерий сам (Фаза 3)', runTweakScenario],
     ['question: read-only аналитик, без задач (Фаза 3)', runQuestionScenario],
     ['path-lock: запись вне workspace блокируется и логируется (Фаза 4)', runPathLockScenario],
+    ['дашборд: node:http смоук — список/детали/чат, ноль записи в доску (§22, П§7.2)', runDashboardSmokeScenario],
+    ['maintenance-минимум: regression_detected как tweak + AUTO_MERGES_PER_DAY (§18, П§7.3)', runMaintenanceScenario],
+    ['Telegram-вход (опционально): parseUpdate + handleIncoming с подставным fetch (П§7)', runTelegramScenario],
   ];
 
   let failed = false;
