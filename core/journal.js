@@ -15,6 +15,17 @@ function db() {
   return _db;
 }
 
+// Идемпотентная добавка колонки: SQLite не даёт ADD COLUMN IF NOT EXISTS,
+// PRAGMA table_info — стандартный кросс-драйверный способ проверить, что
+// правка уже применена (П§2 DEV_GUIDE part2: без отдельного
+// migration-фреймворка, старый journal.db открывается без потери данных).
+function ensureColumn(d, table, column, ddl) {
+  const cols = d.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    d.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+
 function migrate(d) {
   d.exec(`
     CREATE TABLE IF NOT EXISTS tasks (
@@ -60,10 +71,36 @@ function migrate(d) {
       created_at INTEGER
     );
 
+    -- П§2 DEV_GUIDE part2: фундамент Кузницы (§26) и настоящего fan-in (Фаза 6).
+    CREATE TABLE IF NOT EXISTS tools (
+      name TEXT PRIMARY KEY,
+      version INTEGER DEFAULT 1,
+      description TEXT,
+      entry TEXT DEFAULT 'run.js',
+      network TEXT DEFAULT 'none',
+      timeout_ms INTEGER DEFAULT 60000,
+      created_by_task TEXT,
+      status TEXT DEFAULT 'active',
+      usage_count INTEGER DEFAULT 0,
+      last_used_at INTEGER,
+      created_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS task_deps (
+      task_id TEXT NOT NULL,
+      blocked_by TEXT NOT NULL,
+      PRIMARY KEY (task_id, blocked_by)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tasks_status_role ON tasks(status, role);
     CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
     CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+    CREATE INDEX IF NOT EXISTS idx_task_deps_task ON task_deps(task_id);
   `);
+
+  // tasks.tool_name — существующие БД до этой правки не имеют колонки
+  // (26.2: связывает type='tool'/'tool_run' задачу с записью в tools).
+  ensureColumn(d, 'tasks', 'tool_name', 'tool_name TEXT');
 }
 
 function jsonOrNull(v) {
@@ -79,15 +116,20 @@ export function newRunId() {
   return crypto.randomUUID();
 }
 
-/** addTask(t) -> id (§4, DEV_GUIDE §1) */
+/**
+ * addTask(t) -> id (§4, DEV_GUIDE §1). t.tool_name (26.2: связь с tools) и
+ * t.deps (П§2: массив task id — настоящий fan-in через task_deps, вдобавок
+ * к устаревающему одиночному blocked_by_task_id, который остаётся рабочим
+ * для обратной совместимости).
+ */
 export function addTask(t) {
   const id = t.id || newId('task');
   db().prepare(`
     INSERT INTO tasks
       (id, project_id, title, spec, criteria, role, type, status,
        touches_files, touches_functions, blocked_by_task_id,
-       budget_usd, spent_usd, claimed_by, attempts, feedback, question, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       budget_usd, spent_usd, claimed_by, attempts, feedback, question, created_at, tool_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     t.project_id || 'default',
@@ -107,13 +149,22 @@ export function addTask(t) {
     t.feedback || null,
     t.question || null,
     Date.now(),
+    t.tool_name || null,
   );
+  if (Array.isArray(t.deps) && t.deps.length) {
+    const depStmt = db().prepare('INSERT OR IGNORE INTO task_deps (task_id, blocked_by) VALUES (?, ?)');
+    for (const depId of t.deps) {
+      if (depId) depStmt.run(id, depId);
+    }
+  }
   return id;
 }
 
 /**
  * claimNext(role, claimedBy) -> task|null
- * BEGIN IMMEDIATE: pending, роль совпадает, зависимость (если есть) уже done/merged.
+ * BEGIN IMMEDIATE: pending, роль совпадает, И одиночная зависимость (если
+ * есть) done/merged, И все зависимости из task_deps (если есть) done/merged
+ * (П§2: настоящий fan-in — обе формы должны быть удовлетворены одновременно).
  */
 export function claimNext(role, claimedBy = 'worker') {
   const d = db();
@@ -127,6 +178,11 @@ export function claimNext(role, claimedBy = 'worker') {
           OR EXISTS (
             SELECT 1 FROM tasks b WHERE b.id = t.blocked_by_task_id AND b.status IN ('done','merged')
           )
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM task_deps td
+          JOIN tasks bt ON bt.id = td.blocked_by
+          WHERE td.task_id = t.id AND bt.status NOT IN ('done','merged')
         )
       ORDER BY t.created_at ASC
       LIMIT 1
