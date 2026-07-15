@@ -336,3 +336,51 @@ import('./core/journal.js').then(j => {
 **Сетевой инструмент** (§10-этика, robots.txt) — за рамками этого
 дешёвого прогона: реальный сетевой инструмент собирается по делу в Фазе 7
 (researcher, П§6.4 — выпускной экзамен), не здесь отдельным упражнением.
+
+## Ф6. Параллельность — 4 задачи / 2 воркера (П§5)
+
+MOCK-сценарий (§16, детерминированный) уже зелёный — `npm run mock`, ищите
+блок `=== параллельность: 8 задач / 2 воркера + конфликт + tsc-ворота ===`.
+Здесь — уменьшенная вдвое версия (дешевле) на РЕАЛЬНЫХ моделях: кодер —
+Sonnet, reconciler на конфликте — Haiku (роль `cheap`).
+
+**[РЕАЛЬНЫЙ ПРОГОН]**
+```bash
+node --env-file=.env --no-warnings evals/manual/parallel-real-run.js
+```
+Задачи создаются напрямую (не через архитектора — тот непредсказуемо мог
+бы спроектировать DAG вовсе без конфликта; качество архитектора уже
+проверено разделом 4 части 1). Ожидание в логе, по порядку:
+1. `[coordinator]` — задачи 1 и 2 (каждая свой файл) обрабатываются двумя
+   воркерами параллельно, оба уходят в `merge_pending`, затем оба
+   `[merge] ... → merged (без конфликтов)`.
+2. Задачи 3 и 4 — оба воркера пишут `file3.js`/`file4.js` (чисто) И ОБА
+   ОТДЕЛЬНО — `shared.js` разными версиями. Первая из двух мёржится чисто,
+   вторая — `[merge] ... → конфликт в 1 файл(ах), зову reconciler...`,
+   затем `[merge] ... → merged (конфликт разрешён reconciler'ом: ...)`.
+3. Финал: `[parallel-real-run] OK — все 4 задачи merged`.
+
+Проверка вручную:
+```bash
+cat workspace/shared.js   # содержимое = версия ВТОРОЙ смёрженной задачи (theirs)
+git -C workspace log --oneline --all --graph   # видно два loom/w<i>, слияния в main
+```
+
+Проверка событий и стоимости (§14):
+```bash
+node --env-file=.env --no-warnings -e "
+import('./core/journal.js').then(j => {
+  const merged = j.listEvents({ type: 'merged' });
+  console.log(merged.map(e => ({ task_id: e.task_id, payload: JSON.parse(e.payload) })));
+});
+"
+```
+Ожидание: 4 события `merged`, ровно одно с `conflict:true, resolved:true`,
+`payload.worker` заполнен (`w1`/`w2`) в каждом.
+
+**tsc-ворота на реальном `typescript`** — опционально, если хотите
+проверить не graceful-skip, а настоящую красную ветку: `npm install
+typescript` (уже в `optionalDependencies`), добавьте в задачу 3 файл
+`tsconfig.json` + заведомо битый `.ts`-файл в `spec`, повторите прогон —
+ожидание: `[merge] ... FAIL(tsc --noEmit — declares_interface, §15): ...`
+ДО попытки слияния, задача уходит в retry/blocked, а не в конфликт.

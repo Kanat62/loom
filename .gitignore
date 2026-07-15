@@ -13,6 +13,8 @@ workspace/
 workspace.mock/
 tools/
 tools.mock/
+.worktrees/
+.worktrees.mock/
 *.log
 .loom-check-*.cjs
 .loom-tmp/sys-*.txt

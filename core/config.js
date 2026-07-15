@@ -73,6 +73,13 @@ export const HISTORY_DIR = path.join(ROOT, '.history');
 // поэтому в корне LOOM, НЕ в workspace; та же MOCK-изоляция, что у
 // journal/skills/workspace (баг №1 первого живого прогона).
 export const TOOLS_DIR = path.join(ROOT, MOCK_FLAG ? 'tools.mock' : 'tools');
+// Параллельность (Фаза 6, П§5 DEV_GUIDE part2) — воркеры в ОДНОМ процессе
+// (BEGIN IMMEDIATE уже защищает захват межпроцессно, evals/race.js это
+// доказывает — внутрипроцессный случай строго слабее), каждый в своём git
+// worktree продукта. WORKTREES_DIR — та же MOCK-изоляция, что у остальных
+// путей состояния.
+export const CODER_WORKERS = Number(process.env.CODER_WORKERS || 1);
+export const WORKTREES_DIR = path.join(ROOT, MOCK_FLAG ? '.worktrees.mock' : '.worktrees');
 
 export const JOURNAL_DB_PATH = path.join(ROOT, MOCK_FLAG ? 'journal.mock.db' : 'journal.db');
 export const SKILLS_DB_PATH = path.join(ROOT, MOCK_FLAG ? 'skills.mock.db' : 'skills.db');

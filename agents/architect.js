@@ -158,6 +158,14 @@ export async function runArchitect({
     const dependTitle = typeof t.depends_on_title === 'string' ? t.depends_on_title : null;
     const blockedById = dependTitle ? (titleToId.get(dependTitle) || null) : null;
 
+    // Фаза 6 (П§5): настоящий fan-in для ЛЮБОЙ задачи, не только автоматической
+    // регрессии — задача может ждать НЕСКОЛЬКО предшественников (например,
+    // задача-потребитель ждёт и tool_run, и отдельную задачу с данными).
+    // task_deps (П§2), не заменяет depends_on_title — оба могут быть заданы
+    // одновременно, claimNext требует удовлетворения обоих.
+    const dependTitles = Array.isArray(t.depends_on_titles) ? t.depends_on_titles.filter((x) => typeof x === 'string') : [];
+    const depIds = dependTitles.map((title) => titleToId.get(title)).filter(Boolean);
+
     // tool_run: harness строит канонический JSON-вызов сам из tool_name/
     // tool_args, не доверяя модели точный формат spec (§26.2 «Использование»).
     const spec = t.type === 'tool_run'
@@ -174,6 +182,7 @@ export async function runArchitect({
       tool_name: (t.type === 'tool' || t.type === 'tool_run') ? t.tool_name : undefined,
       touches_files: Array.isArray(t.touches_files) ? t.touches_files : [],
       blocked_by_task_id: blockedById,
+      deps: depIds.length ? depIds : undefined,
     });
     createdIds.push(id);
     titleToId.set(t.title, id);

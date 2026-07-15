@@ -161,16 +161,32 @@ export function addTask(t) {
 }
 
 /**
- * claimNext(role, claimedBy) -> task|null
+ * claimNext(role, claimedBy, {activeTouches, excludeTypes}) -> task|null
  * BEGIN IMMEDIATE: pending, роль совпадает, И одиночная зависимость (если
  * есть) done/merged, И все зависимости из task_deps (если есть) done/merged
  * (П§2: настоящий fan-in — обе формы должны быть удовлетворены одновременно).
+ *
+ * activeTouches (Фаза 6, П§5 weave по файлам) — необязательный массив путей,
+ * которые уже трогают ДРУГИЕ claimed/merge_pending задачи прямо сейчас;
+ * candidate с пересекающимися touches_files пропускается в пользу
+ * следующего по created_at. Пересечение массивов JSON — в JS, не в SQL
+ * (JSON в SQLite парсить SQL-выражением хрупко, П§5 прямо это оговаривает):
+ * выбираем всех кандидатов ОДНИМ запросом внутри той же BEGIN IMMEDIATE
+ * транзакции, фильтруем в JS, захватываем первого непересекающегося.
+ * Без activeTouches (однопоточный путь, как раньше) — поведение НЕ меняется:
+ * первый кандидат по created_at, тот же результат, что был при LIMIT 1.
+ *
+ * excludeTypes — необязательный массив типов, которые эта попытка захвата
+ * не должна брать (Фаза 6: параллельный воркер работает в СВОЁМ worktree,
+ * а type='regression'/'tool_run' обязаны исполняться против main —
+ * §16 п.8, «регрессия строго после пустой очереди мёржей» — воркер их не трогает,
+ * дожидается последовательной фазы после параллельной).
  */
-export function claimNext(role, claimedBy = 'worker') {
+export function claimNext(role, claimedBy = 'worker', { activeTouches, excludeTypes } = {}) {
   const d = db();
   d.exec('BEGIN IMMEDIATE');
   try {
-    const row = d.prepare(`
+    let candidates = d.prepare(`
       SELECT t.* FROM tasks t
       WHERE t.status = 'pending' AND t.role = ?
         AND (
@@ -185,8 +201,27 @@ export function claimNext(role, claimedBy = 'worker') {
           WHERE td.task_id = t.id AND bt.status NOT IN ('done','merged')
         )
       ORDER BY t.created_at ASC
-      LIMIT 1
-    `).get(role);
+    `).all(role);
+
+    if (excludeTypes && excludeTypes.length) {
+      const ex = new Set(excludeTypes);
+      candidates = candidates.filter((c) => !ex.has(c.type));
+    }
+
+    let row = null;
+    if (!activeTouches || !activeTouches.length) {
+      row = candidates[0] || null;
+    } else {
+      const activeSet = new Set(activeTouches);
+      row = candidates.find((c) => {
+        let touches;
+        try { touches = JSON.parse(c.touches_files || '[]'); } catch { touches = []; }
+        // Задача без объявленных touches_files не считается пересекающейся ни
+        // с чем (архитектор ОБЯЗАН объявлять их в Фазе 6, но деградация для
+        // задач без объявления — «разрешить», не «зависнуть навсегда»).
+        return !touches.some((f) => activeSet.has(f));
+      }) || null;
+    }
 
     if (!row) {
       d.exec('COMMIT');
@@ -213,10 +248,14 @@ export function claimNext(role, claimedBy = 'worker') {
 /**
  * setStatus(id, status, {feedback?, question?}) — feedback ПЕРЕЗАПИСЫВАЕТСЯ,
  * не накапливается (§4, шрам: рост контекста). claimed_by сбрасывается, когда
- * задача покидает claimed.
+ * задача покидает claimed — КРОМЕ перехода в 'merge_pending' (Фаза 6, П§5):
+ * задача там всё ещё «принадлежит» воркеру/worktree'у, чья ветка ждёт
+ * слияния — core/merge.js:mergeOneTask читает claimed_by, чтобы найти,
+ * КАКОЙ worktree/branch сливать (`loom/w<i>`); обнулять его раньше времени
+ * значило бы потерять эту связь ровно тогда, когда она нужнее всего.
  */
 export function setStatus(id, status, extra = {}) {
-  const clearClaim = status !== 'claimed';
+  const clearClaim = status !== 'claimed' && status !== 'merge_pending';
   const fields = ['status = ?'];
   const args = [status];
   if (clearClaim) { fields.push('claimed_by = ?'); args.push(null); }

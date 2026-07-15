@@ -16,9 +16,11 @@ import { runCoder, clearEyesState } from '../agents/coder.js';
 import { runTester } from '../agents/tester.js';
 import { runSkillWriter } from '../agents/skill.js';
 import { isDockerAvailable, buildWorkspaceImage } from './docker.js';
-import { WORKSPACE, TOOLS_DIR, MAX_ATTEMPTS, ROOT } from './config.js';
+import { WORKSPACE, TOOLS_DIR, WORKTREES_DIR, MAX_ATTEMPTS, ROOT } from './config.js';
 import { progress } from './io.js';
 import { registerTool, runTool, listTools } from './tools.js';
+import { ensureWorktree } from './worktrees.js';
+import { drainMergeQueue } from './merge.js';
 
 function git(args, cwd) {
   try {
@@ -100,6 +102,33 @@ function ensureWorkspaceGit(workspaceDir) {
     git(['init', '-q'], workspaceDir);
     git(['config', 'user.email', 'loom@local'], workspaceDir);
     git(['config', 'user.name', 'LOOM coder'], workspaceDir);
+  }
+}
+
+/**
+ * Реальный баг, найден MOCK-сценарием параллельности: `git merge --no-ff`
+ * в ветку БЕЗ единого коммита («empty head») технически падает — не
+ * конфликт, а git отказывается делать non-fast-forward merge в пустую
+ * историю. Однопоточный путь этого никогда не задевал (там нет merge --no-ff
+ * вообще, только autoCommit), но параллельная фаза создаёт worktrees и
+ * мёржит В main ДО того, как кодер вообще успел что-то закоммитить — нужен
+ * явный пустой стартовый коммит, чтобы у main было ОТ ЧЕГО ветвиться и КУДА
+ * мёржить.
+ */
+function ensureInitialCommit(workspaceDir) {
+  try {
+    execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspaceDir, stdio: 'pipe' });
+  } catch {
+    // Реальный баг, тоже найден MOCK-сценарием: --allow-empty БЕЗ git add
+    // оставлял package.json (уже написанный ensureWorkspacePackageJson НА
+    // ДИСК main до этого коммита) неотслеженным — worktrees ветвились БЕЗ
+    // него, потом каждый воркер создавал СВОЙ package.json заново, и при
+    // мёрже git отказывался перезаписать untracked-файл main'а версией из
+    // ветки («would be overwritten by merge»). git add -A перед коммитом —
+    // всё, что уже лежит на диске (package.json), становится частью
+    // стартовой истории, worktrees наследуют его сразу.
+    git(['add', '-A'], workspaceDir);
+    git(['commit', '--allow-empty', '-q', '-m', 'loom: initial commit (parallel phase root)'], workspaceDir);
   }
 }
 
@@ -190,9 +219,25 @@ function handleAttemptFailure(task, runId, report, role) {
  * запроса) — нужен для точного итога по токенам за запрос. Без него, как и
  * раньше, каждая попытка получает свой независимый run_id (/resume, cli.js,
  * evals — где нет единого «запроса», от которого можно унаследовать id).
+ *
+ * opts (Фаза 6, П§5 параллельность):
+ * - claimedBy — идентификатор захвата ('w1'/'w2'/… для воркеров вместо
+ *   дефолтного 'coordinator-<pid>').
+ * - activeTouches/excludeTypes — прокидываются в claimNext (weave по файлам,
+ *   исключение regression/tool_run из параллельного захвата).
+ * - preClaimed — задача уже захвачена вызывающим (параллельная фаза сама
+ *   зовёт claimNext раньше, чтобы решить, параллелится ли тип задачи, ДО
+ *   выбора worktree) — тогда claimNext здесь не вызывается повторно.
+ * - onSuccessStatus — статус на зелёном критерии вместо 'done' (параллельная
+ *   фаза использует 'merge_pending' — воркер завершил свою часть, слияние в
+ *   main происходит отдельно, последовательно, core/merge.js). НЕ применяется
+ *   к type='tool'/'tool_run'/'regression' — им merge-очередь не нужна,
+ *   для них 'done' всегда означает готово по-настоящему.
  */
-export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, sharedRunId = null) {
-  const task = claimNext(role, `coordinator-${process.pid}`);
+export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, sharedRunId = null, opts = {}) {
+  const task = opts.preClaimed || claimNext(role, opts.claimedBy || `coordinator-${process.pid}`, {
+    activeTouches: opts.activeTouches, excludeTypes: opts.excludeTypes,
+  });
   if (!task) return null;
 
   const runId = sharedRunId || newRunId();
@@ -321,11 +366,18 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
     } else {
       autoCommit(workspaceDir, `loom: done ${task.id}`);
     }
-    setStatus(task.id, 'done', { feedback: report });
+    // Параллельная фаза (Фаза 6, П§5): 'merge_pending' вместо 'done' — воркер
+    // закончил СВОЮ часть в СВОЁМ worktree, интеграция в main происходит
+    // отдельно, последовательно (core/merge.js). Не применяется к
+    // tool/tool_run/regression — им очередь мёржей не нужна, 'done' для них
+    // означает готово по-настоящему уже сейчас (isTool/isToolRun/regression
+    // писали не в workspaceDir-worktree, а в свои собственные корни).
+    const finalStatus = (!isTool && !isToolRun && task2.type !== 'regression' && opts.onSuccessStatus) || 'done';
+    setStatus(task.id, finalStatus, { feedback: report });
     clearEyesState(task.id);
     await writeSkillSafely(task.id, runId);
-    progress(`[coordinator] задача done, осталось ${remainingCount(role)}`);
-    return { task: getTask(task.id), verdict: 'done' };
+    progress(`[coordinator] задача ${finalStatus === 'merge_pending' ? 'готова к мёржу (merge_pending)' : 'done'}, осталось ${remainingCount(role)}`);
+    return { task: getTask(task.id), verdict: finalStatus };
   }
 
   return handleAttemptFailure(task, runId, report, role);
@@ -344,15 +396,106 @@ async function writeSkillSafely(taskId, runId) {
 }
 
 /**
+ * Объединение touches_files всех задач сейчас в claimed/merge_pending
+ * (Фаза 6, П§5 weave) — передаётся в claimNext воркера ПЕРЕД каждым
+ * захватом. Синхронная функция, без await: внутри одного JS-раунда
+ * (Promise.all по воркерам) каждый воркер синхронно захватывает ДО первого
+ * await своего хода, поэтому следующий воркер в том же .map()-раунде уже
+ * видит захват предыдущего — однопоточность JS даёт это бесплатно, без
+ * явной координации между воркерами.
+ */
+function computeActiveTouches(role) {
+  const active = [...listTasks({ status: 'claimed', role }), ...listTasks({ status: 'merge_pending', role })];
+  const set = new Set();
+  for (const t of active) {
+    let touches;
+    try { touches = JSON.parse(t.touches_files || '[]'); } catch { touches = []; }
+    for (const f of touches) set.add(f);
+  }
+  return [...set];
+}
+
+/** Есть ли хоть одна pending-задача, которая ИМЕЕТ смысл параллелить (не regression/tool_run — им нужен main). */
+function hasParallelizableWork(role) {
+  return listTasks({ status: 'pending', role }).some((t) => t.type !== 'regression' && t.type !== 'tool_run');
+}
+
+async function claimAndRunInWorktree({
+  workerId, role, workspaceDir, worktreesDir, runId,
+}) {
+  const activeTouches = computeActiveTouches(role);
+  const claimedBy = `w${workerId}`;
+  // regression/tool_run исключены из параллельного захвата на уровне
+  // claimNext (excludeTypes) — им нужен workspaceDir=main, не worktree
+  // воркера (§16 п.8); последовательная фаза после параллельной их заберёт.
+  const task = claimNext(role, claimedBy, { activeTouches, excludeTypes: ['regression', 'tool_run'] });
+  if (!task) return null;
+
+  const worktreePath = ensureWorktree(workspaceDir, worktreesDir, workerId);
+  return processOneTask(role, worktreePath, runId, {
+    claimedBy, activeTouches, onSuccessStatus: 'merge_pending', preClaimed: task,
+  });
+}
+
+/**
+ * Параллельная фаза (Фаза 6, П§5): N воркеров в ОДНОМ процессе, каждый в
+ * своём git worktree продукта; зелёный критерий → merge_pending (не done);
+ * после каждого раунда — последовательное дренирование очереди мёржей
+ * (core/merge.js: git merge, tsc-ворота, LLM-reconciler на конфликт).
+ * Регрессия/live_in — НЕ здесь (§16 п.8: строго после пустой очереди
+ * мёржей) — вызывающий (runCoordinatorLoop) доводит их последовательной
+ * фазой ПОСЛЕ этой функции, тем же кодом, что и однопоточный путь.
+ */
+async function runParallelPhase({
+  role, workspaceDir, runId, workers, maxIterations,
+}) {
+  ensureWorkspaceGit(workspaceDir);
+  ensureInitialCommit(workspaceDir);
+  const worktreesDir = WORKTREES_DIR;
+  const workerIds = Array.from({ length: workers }, (_, i) => i + 1);
+  for (const id of workerIds) ensureWorktree(workspaceDir, worktreesDir, id);
+
+  const results = [];
+  let iterations = 0;
+  for (;;) {
+    if (iterations >= maxIterations) break;
+    if (!hasParallelizableWork(role)) break;
+
+    const roundPromises = workerIds.map((id) => claimAndRunInWorktree({
+      workerId: id, role, workspaceDir, worktreesDir, runId,
+    }));
+    // eslint-disable-next-line no-await-in-loop
+    const roundResults = await Promise.all(roundPromises);
+    const claimedAny = roundResults.some((r) => r !== null);
+    for (const r of roundResults) if (r) results.push(r);
+
+    // eslint-disable-next-line no-await-in-loop
+    const mergedCount = await drainMergeQueue({
+      role, workspaceDir, worktreesDir, workerIds, runId,
+    });
+
+    iterations++;
+    if (!claimedAny && !mergedCount) break; // раунд ничего не взял и нечего мёржить — параллелить больше нечего
+  }
+  return results;
+}
+
+/**
  * Цикл координатора: gitGuard pre-flight (шрам 5) → releaseStuck() на
  * КАЖДОМ входе (шрам 25 — задачи навечно в claimed после смерти процесса),
  * затем обработка задач роли role до опустошения очереди или maxIterations.
  * runId (опционально) — сквозной run_id одного клиентского запроса (talk.js);
  * без него, как и раньше, каждая захваченная задача получает свой (см.
  * processOneTask).
+ *
+ * workers>1 (Фаза 6, П§5): сначала параллельная фаза (worktrees + merge
+ * queue) для параллелящихся типов, ЗАТЕМ обычная последовательная фаза
+ * (без изменений, тот же код, что при workers=1) добирает то, что
+ * параллельная фаза сознательно не взяла (regression/tool_run — им нужен
+ * main, §16 п.8) и всё, что осталось после неё (retry-задачи, tool-задачи).
  */
 export async function runCoordinatorLoop({
-  role = 'coder', workspaceDir = WORKSPACE, maxIterations = Infinity, runId = null,
+  role = 'coder', workspaceDir = WORKSPACE, maxIterations = Infinity, runId = null, workers = 1,
 } = {}) {
   const guard = gitGuard();
   if (!guard.ok) {
@@ -360,6 +503,14 @@ export async function runCoordinatorLoop({
   }
   releaseStuck();
   const results = [];
+
+  if (workers > 1) {
+    const parallelResults = await runParallelPhase({
+      role, workspaceDir, runId, workers, maxIterations,
+    });
+    results.push(...parallelResults);
+  }
+
   let iterations = 0;
   for (;;) {
     if (iterations >= maxIterations) break;

@@ -197,6 +197,27 @@ registerMockHandler('coder', ({ userMsg }) => {
     };
   }
 
+  // Фаза 6 (П§5): «8 задач / 2 воркера» — 6 чистых задач (каждая свой файл)
+  // + 2 задачи 7/8, которые ДОПОЛНИТЕЛЬНО (не заявляя это в touches_files —
+  // искусственный, но реалистичный blind spot file-level weave) пишут в
+  // ОБЩИЙ shared.js разными версиями — настоящий git-конфликт при слиянии,
+  // ловит core/merge.js:reconcile().
+  const parallelClean = title.match(/^Параллельная задача (\d+): (file\d+\.js)$/);
+  if (parallelClean) {
+    const [, n, file] = parallelClean;
+    return { files: { [file]: `module.exports = { n: ${n} };\n` } };
+  }
+  const parallelConflict = title.match(/^Параллельная задача (\d+): (file\d+\.js) \+ shared\.js \(версия ([AB])\)$/);
+  if (parallelConflict) {
+    const [, n, file, version] = parallelConflict;
+    return {
+      files: {
+        [file]: `module.exports = { n: ${n} };\n`,
+        'shared.js': `module.exports = { version: '${version}' };\n`,
+      },
+    };
+  }
+
   // Задача вне сценария калькулятора (например, evals/budget.js) — детерминированная
   // заглушка-файл, чтобы другие MOCK-прогоны могли переиспользовать этот хендлер,
   // не расширяя сам сценарий-эталон.
@@ -367,10 +388,24 @@ registerMockHandler('skill', ({ userMsg }) => {
   return { lesson: `${files[0]}: реализовать ВСЕ ветки функции сразу — тестер ловит частичные реализации говорящим провалом.` };
 });
 
-// --- cheap (используется как псевдо-judge в evals/interview.js) -----------
+// --- cheap (псевдо-judge в evals/interview.js И reconciler Фазы 6) --------
 // Переиспользует ТОЧНО ТУ ЖЕ функцию, что и код-уровневый guard в
 // agents/advisor.js — не дублирует регэксп второй раз с риском разъехаться.
-registerMockHandler('cheap', ({ userMsg }) => ({ has_technical_terms: containsTechnicalQuestion(userMsg) }));
+registerMockHandler('cheap', ({ userMsg }) => {
+  // §16 mock-reconciler (DoD П§5: «mock-reconciler выбирает theirs») —
+  // распознаётся по маркеру заголовка, который всегда пишет core/merge.js:reconcile().
+  if (/^## Конфликт слияния/.test(userMsg)) {
+    const files = {};
+    const fileRe = /### Файл: (\S+)/g;
+    let m = fileRe.exec(userMsg);
+    while (m) {
+      files[m[1]] = 'theirs';
+      m = fileRe.exec(userMsg);
+    }
+    return { files };
+  }
+  return { has_technical_terms: containsTechnicalQuestion(userMsg) };
+});
 
 // --- Сценарий А (Фаза 1/2): голый координатор без советника/роутера -------
 async function runCalculatorScenario() {
@@ -683,6 +718,127 @@ async function runForgeScenario() {
   console.log('[mock] forge: повторная регистрация с тем же описанием — версия не изменилась (reuse идемпотентен).');
 }
 
+// --- Сценарий Ж (§16, П§5): параллельность — 8 задач / 2 воркера ----------
+async function runParallelScenario() {
+  const {
+    addTask, listTasks, listEvents, newRunId,
+  } = await import('./journal.js');
+  const { runCoordinatorLoop } = await import('./coordinator.js');
+  const { WORKSPACE, WORKTREES_DIR, ROOT } = await import('./config.js');
+  const { tscGate } = await import('./merge.js');
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+
+  if (fsMod.existsSync(WORKSPACE)) fsMod.rmSync(WORKSPACE, { recursive: true, force: true });
+  if (fsMod.existsSync(WORKTREES_DIR)) fsMod.rmSync(WORKTREES_DIR, { recursive: true, force: true });
+  fsMod.mkdirSync(WORKSPACE, { recursive: true });
+
+  // --- tsc-ворота: юнит-проверка трёх веток БЕЗ реального typescript/сети ---
+  // (typescript — optionalDependency, недоступен в этой среде; npx без
+  // предустановленного пакета качает его из сети — недопустимо в MOCK, §24).
+  const scratch = pathMod.join(WORKTREES_DIR, '..', '.tsc-gate-scratch');
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+
+  const noConfigDir = pathMod.join(scratch, 'no-config');
+  fsMod.mkdirSync(noConfigDir, { recursive: true });
+  const gateNoConfig = tscGate(noConfigDir);
+  if (!gateNoConfig.ok) throw new Error('tsc-gate: без tsconfig.json ворота обязаны быть ok=true (не применимы)');
+
+  const noBinDir = pathMod.join(scratch, 'no-bin');
+  fsMod.mkdirSync(noBinDir, { recursive: true });
+  fsMod.writeFileSync(pathMod.join(noBinDir, 'tsconfig.json'), '{}', 'utf8');
+  const gateNoBin = tscGate(noBinDir);
+  if (!gateNoBin.ok || !gateNoBin.skipped) {
+    throw new Error('tsc-gate: typescript недоступен локально — ворота обязаны graceful-degrade (ok=true, skipped=true), не блокировать и не лезть в сеть');
+  }
+
+  const badDir = pathMod.join(scratch, 'bad-dts');
+  const binDir = pathMod.join(badDir, 'node_modules', '.bin');
+  fsMod.mkdirSync(binDir, { recursive: true });
+  fsMod.writeFileSync(pathMod.join(badDir, 'tsconfig.json'), '{}', 'utf8');
+  fsMod.writeFileSync(pathMod.join(badDir, 'bad.d.ts'), 'declare const x: DoesNotExist;\n', 'utf8');
+  const fakeTscImplPath = pathMod.join(ROOT, 'evals', 'fixtures', 'fake-tsc-impl.js');
+  if (process.platform === 'win32') {
+    fsMod.writeFileSync(pathMod.join(binDir, 'tsc.cmd'), `@echo off\r\nnode "${fakeTscImplPath}" %*\r\n`, 'utf8');
+  } else {
+    const shPath = pathMod.join(binDir, 'tsc');
+    fsMod.writeFileSync(shPath, `#!/bin/sh\nnode "${fakeTscImplPath}" "$@"\n`, 'utf8');
+    fsMod.chmodSync(shPath, 0o755);
+  }
+  const gateBad = tscGate(badDir);
+  if (gateBad.ok) throw new Error('tsc-gate: с подсунутым битым bad.d.ts (через тестовый двойник tsc) ворота обязаны быть ok=false');
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+  console.log('[mock] tsc-gate юнит-проверки OK: без tsconfig → не применимо; typescript недоступен → graceful skip (без сети); битый d.ts → gate=false.');
+
+  // --- 8 задач / 2 воркера: 6 «чистых» + 2 с искусственным конфликтом на shared.js ---
+  const runId = newRunId();
+  for (let n = 1; n <= 6; n++) {
+    addTask({
+      title: `Параллельная задача ${n}: file${n}.js`,
+      spec: `Создай file${n}.js.`,
+      criteria: JSON.stringify({ cmd: `node -e "const fs=require('fs'); if(fs.existsSync('file${n}.js')){console.log('PASS file${n}.js')}else{console.error('FAIL: file${n}.js missing');process.exit(1)}"` }),
+      role: 'coder',
+      type: 'project',
+      touches_files: [`file${n}.js`],
+    });
+  }
+  // 7/8 НЕ объявляют shared.js в touches_files (реалистичный blind spot
+  // file-level weave, §16 п.3: touches_functions/tree-sitter сознательно НЕ
+  // в v1.0-final) — оба claim'ятся в одном раунде, оба пишут shared.js
+  // разными версиями в СВОИХ worktree, конфликт всплывает на merge, не раньше.
+  for (const [n, version] of [[7, 'A'], [8, 'B']]) {
+    addTask({
+      title: `Параллельная задача ${n}: file${n}.js + shared.js (версия ${version})`,
+      spec: `Создай file${n}.js; также запиши shared.js версии ${version} (искусственный конфликт для проверки reconciler'а).`,
+      criteria: JSON.stringify({ cmd: `node -e "const fs=require('fs'); if(fs.existsSync('file${n}.js')){console.log('PASS file${n}.js')}else{console.error('FAIL: file${n}.js missing');process.exit(1)}"` }),
+      role: 'coder',
+      type: 'project',
+      touches_files: [`file${n}.js`],
+    });
+  }
+
+  await runCoordinatorLoop({
+    role: 'coder', workspaceDir: WORKSPACE, workers: 2, runId,
+  });
+
+  const tasks = listTasks({ role: 'coder' }).filter((t) => t.title.startsWith('Параллельная задача'));
+  console.log(`[mock] parallel: ${tasks.map((t) => `${t.title.split(':')[0]}=${t.status}`).join(', ')}`);
+  if (tasks.length !== 8) throw new Error(`parallel: ожидали 8 задач, нашли ${tasks.length}`);
+  if (!tasks.every((t) => t.status === 'merged')) {
+    throw new Error(`parallel: не все 8 задач дошли до merged: ${tasks.map((t) => `${t.id}=${t.status}`).join('; ')}`);
+  }
+  if (!tasks.every((t) => t.attempts === 1)) {
+    throw new Error(`parallel: ожидали ровно 1 попытку на задачу (ни одного двойного захвата/повтора), получили ${tasks.map((t) => t.attempts).join(',')}`);
+  }
+
+  const mergedEvents = listEvents({ type: 'merged' }).filter((e) => tasks.some((t) => t.id === e.task_id));
+  if (mergedEvents.length !== 8) throw new Error(`parallel: ожидали 8 merged-событий, получили ${mergedEvents.length}`);
+  for (let i = 1; i < mergedEvents.length; i++) {
+    if (mergedEvents[i].created_at < mergedEvents[i - 1].created_at) {
+      throw new Error('parallel: merge-события не монотонны по времени — очередь мёржей не последовательна');
+    }
+  }
+  const workersUsed = new Set(mergedEvents.map((e) => {
+    try { return JSON.parse(e.payload || '{}').worker; } catch { return null; }
+  }).filter(Boolean));
+  if (workersUsed.size < 2) throw new Error(`parallel: ожидали, что оба воркера (w1,w2) реально поучаствовали, видно только: ${[...workersUsed].join(',')}`);
+
+  const resolvedConflict = mergedEvents.find((e) => {
+    try {
+      const p = JSON.parse(e.payload || '{}');
+      return p.conflict === true && p.resolved === true;
+    } catch { return false; }
+  });
+  if (!resolvedConflict) throw new Error('parallel: не найдено ни одного успешно разрешённого конфликта — reconciler не сработал');
+
+  const sharedContent = fsMod.readFileSync(pathMod.join(WORKSPACE, 'shared.js'), 'utf8');
+  if (!/version:\s*'[AB]'/.test(sharedContent)) {
+    throw new Error(`parallel: shared.js в main не похож на результат reconcile: ${sharedContent}`);
+  }
+
+  console.log(`[mock] parallel OK — 8/8 merged с первой попытки, очередь мёржей последовательна (${mergedEvents.length} событий), оба воркера (${[...workersUsed].join(',')}) поучаствовали, конфликт shared.js разрешён reconciler'ом ("theirs"), итоговое содержимое: ${sharedContent.trim()}`);
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -694,7 +850,9 @@ async function main() {
   resetMockState();
 
   const fs = await import('node:fs');
-  const { JOURNAL_DB_PATH, SKILLS_DB_PATH, WORKSPACE, TOOLS_DIR } = await import('./config.js');
+  const {
+    JOURNAL_DB_PATH, SKILLS_DB_PATH, WORKSPACE, TOOLS_DIR, WORKTREES_DIR,
+  } = await import('./config.js');
   for (const dbPath of [JOURNAL_DB_PATH, SKILLS_DB_PATH]) {
     for (const suffix of ['', '-wal', '-shm']) {
       const p = dbPath + suffix;
@@ -705,6 +863,8 @@ async function main() {
   // Кузница (§26, П§4): tools.mock/ — та же изоляция, что у workspace.mock
   // (баг №1 первого живого прогона — MOCK и реальный режим не делят состояние).
   if (fs.existsSync(TOOLS_DIR)) fs.rmSync(TOOLS_DIR, { recursive: true, force: true });
+  // Параллельность (Фаза 6, П§5): .worktrees.mock/ — та же изоляция.
+  if (fs.existsSync(WORKTREES_DIR)) fs.rmSync(WORKTREES_DIR, { recursive: true, force: true });
 
   const { releaseStuck } = await import('./journal.js');
   releaseStuck();
@@ -713,6 +873,7 @@ async function main() {
     ['calculator (Фаза 1/2)', runCalculatorScenario],
     ['project pipeline: wish → router/advisor/architect/coordinator/skill (Фаза 3)', runProjectPipelineScenario],
     ['Кузница инструментов: word-count (§26.6)', runForgeScenario],
+    ['параллельность: 8 задач / 2 воркера + конфликт + tsc-ворота (§16, П§5)', runParallelScenario],
     ['tweak: router пишет критерий сам (Фаза 3)', runTweakScenario],
     ['question: read-only аналитик, без задач (Фаза 3)', runQuestionScenario],
     ['path-lock: запись вне workspace блокируется и логируется (Фаза 4)', runPathLockScenario],
