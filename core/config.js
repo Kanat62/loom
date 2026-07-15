@@ -88,6 +88,10 @@ export const MOCK = process.env.MOCK === '1';
 // Флаг тишины для evals: подавляет живой прогресс (io.js: progress()),
 // не трогает итоговые отчёты (report/status печатаются как обычно).
 export const QUIET = process.env.LOOM_QUIET === '1';
+// Фаза 5 (§22, П§3 DEV_GUIDE part2): публикация в GitHub только по явному
+// флагу — сдача не должна требовать сети по умолчанию. В MOCK игнорируется
+// всегда (core/github.js вызывается в dry-run режиме безусловно, §24).
+export const GITHUB_PUSH = process.env.GITHUB_PUSH === '1';
 // Синтетическая стоимость одного мок-вызова — позволяет детерминированно
 // проверять budget_usd-стоп без единого реального вызова модели (DEV_GUIDE
 // §4 DoD: «бюджет-стоп срабатывает на игрушечном лимите 0.01»), см. evals/budget.js.

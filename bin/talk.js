@@ -18,7 +18,8 @@ import {
   addTask, getTask, listTasks, releaseStuck, newRunId, setRootSpec, getRootSpec,
   listEvents, listEventsSince,
 } from '../core/journal.js';
-import { WORKSPACE, HISTORY_DIR } from '../core/config.js';
+import { WORKSPACE, HISTORY_DIR, MOCK, GITHUB_PUSH } from '../core/config.js';
+import { ensureProductRepo, slugify } from '../core/github.js';
 
 const PROJECT_PROTOCOLS = new Set(['wish', 'problem', 'spec']);
 // Момент старта сеанса — итог "за сеанс" (/status, /exit) считается по всем
@@ -221,7 +222,29 @@ async function runProjectFlow(protocol, initialText, runId) {
     problem: brief.problem, boardSummary: boardSummaryText(allTreeIds), liveinSummary, runId,
   });
   console.log(report);
+  publishToGithub(merged.spec);
   printRunTokenSummary(runId);
+}
+
+/**
+ * Фаза 5 (П§3 DEV_GUIDE part2): публикация после отчёта консультанта —
+ * только тогда есть что публиковать (дерево зелёное, обживание прошло).
+ * MOCK — всегда dry-run, GITHUB_PUSH в MOCK игнорируется (§24); в реальном
+ * режиме — только по явному GITHUB_PUSH=1. Недоступный gh/сеть → одна
+ * честная строка в сдаче, НЕ падение прогона (история задач уже сохранена
+ * autoCommit'ом независимо от публикации).
+ */
+function publishToGithub(rootSpecSummary) {
+  if (!MOCK && !GITHUB_PUSH) return;
+  const name = slugify(rootSpecSummary);
+  const result = ensureProductRepo(WORKSPACE, name, { dryRun: MOCK });
+  if (result.dryRun) {
+    console.log(`\n[github] MOCK dry-run (сеть не трогается): ${result.dryRunCmd}`);
+  } else if (result.ok) {
+    console.log(`\n[github] опубликовано: ${result.url || '(gh не вернул URL в выводе)'}`);
+  } else {
+    console.log(`\n[github] репозиторий не создан: ${result.error}`);
+  }
 }
 
 async function runTweakFlow(text, criteria, runId, verification = false) {

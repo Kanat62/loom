@@ -394,6 +394,17 @@ async function runProjectPipelineScenario() {
   });
   if (typeof report !== 'string' || !report.trim()) throw new Error('consultant report: пустой отчёт');
   console.log(`[mock] consultant report OK (${report.length} симв.):\n${report.split('\n').map((l) => `    ${l}`).join('\n')}`);
+
+  // --- Фаза 5 (П§3): публикация — MOCK всегда dry-run (§24), ни gh, ни сеть
+  // не трогаются; проверяется только корректность построенной команды.
+  const { ensureProductRepo, slugify } = await import('./github.js');
+  const repoName = slugify(brief.summary);
+  const githubResult = ensureProductRepo(WORKSPACE, repoName, { dryRun: true });
+  if (!githubResult.dryRun) throw new Error('github: MOCK обязан быть dry-run (GITHUB_PUSH игнорируется в MOCK, §24)');
+  if (!githubResult.dryRunCmd.includes('gh repo create') || !githubResult.dryRunCmd.includes(repoName)) {
+    throw new Error(`github: dry-run команда выглядит некорректно: ${githubResult.dryRunCmd}`);
+  }
+  console.log(`[mock] github dry-run OK: ${githubResult.dryRunCmd}`);
 }
 
 // --- Сценарий В (Фаза 3): tweak — router сам пишет критерий ---------------
