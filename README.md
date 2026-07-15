@@ -31,8 +31,17 @@ weave по `touches_files` в `claimNext` (не даёт двум воркера
 писать в один файл), последовательная очередь мёржей с LLM-reconciler на
 конфликт (`core/merge.js`, роль `cheap`, выбор ours/theirs — не пишет
 новый код) и tsc-ворота уровня 0 перед мёржем (опционально, если
-`typescript` доступен локально) — П§5. Остальное — глубина входа
-(researcher/ingest/банк evals), дашборд/FTS5/Telegram — не построено.
+`typescript` доступен локально) — П§5. **Фаза 7 — глубина входа**:
+researcher (`agents/researcher.js`, §10) — двузвонковый цикл план→оценка
+поверх Кузницы, жёсткий стоп-фактор `data_unavailable` (архитектор просто
+не вызывается, ветки «продолжить без данных» в коде нет); приём ТЗ-пакета
+(`agents/ingest.js` + `bin/ingest.js` + `/ingest <папка>` в talk, §11) —
+разбор документов на требования с id, поиск дыр/противоречий ДО архитектора,
+трассировка `covers:[reqId]` в задачах архитектора (непокрытое требование —
+отчётность, не блокировка); банк эталонных желаний (`evals/bank/*.json` +
+`evals/bank.js`, `npm run bank:mock`/`npm run bank`) и LLM-as-judge
+(`evals/judge.js`, событие `eval_score`, метрика — никогда не ворота) — П§6.
+Остальное — дашборд/FTS5/Telegram/maintenance-минимум (Фаза 8) — не построено.
 
 ## Быстрый старт
 
@@ -55,9 +64,9 @@ npm run talk                # интерактивная сессия: question/
 единственная точка вызовов модели (claude-cli); `coordinator.js` —
 детерминированный цикл захват→исполнение→вердикт; `mock.js` —
 детерминированные ответы всех ролей для `MOCK=1`); `agents/*.js` — роли
-(router, advisor, architect, coder, tester, skill, live_in); `bin/` —
-точки входа (`talk.js`/`resume.js`/`ask.js`/`cli.js`); `docs/` — спецификация
-и раннбук.
+(router, advisor, architect, coder, tester, skill, live_in, researcher,
+ingest); `bin/` — точки входа (`talk.js`/`resume.js`/`ask.js`/`cli.js`/
+`ingest.js`); `docs/` — спецификация и раннбук.
 
 ## MOCK-режим
 

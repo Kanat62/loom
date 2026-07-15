@@ -1,0 +1,7 @@
+{
+  "input": "Хочу одностраничник кофейни с меню и контактами.",
+  "route_expected": "wish",
+  "protocol_expected": "wish",
+  "min_tasks": 1,
+  "forbidden_in_interview": ["px", "ms", "api", "fps", "порт", "endpoint", "фреймворк"]
+}

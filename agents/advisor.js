@@ -215,7 +215,7 @@ export async function runAnalyst({ question, rootSpec, workspaceDir, runId }) {
  * «проблема» (см. prompts/advisor.report.md).
  */
 export async function buildConsultantReport({
-  protocol, rootSpec, engineeringDefaults = [], problem, boardSummary, liveinSummary, runId,
+  protocol, rootSpec, engineeringDefaults = [], problem, boardSummary, liveinSummary, dataSources, runId,
 }) {
   const parts = [
     `## Протокол\n${protocol}`,
@@ -224,6 +224,11 @@ export async function buildConsultantReport({
   ];
   if (problem) {
     parts.push(`## Диагностика (только для protocol=problem)\n${JSON.stringify(problem, null, 2)}`);
+  }
+  // Исследователь (§10, П§6.1): если данные добывались — отчёт ОБЯЗАН
+  // включить блок «данные взяты оттуда-то, обновляются так-то» (§17).
+  if (dataSources) {
+    parts.push(`## Данные (Исследователь, §10)\n${dataSources}`);
   }
   parts.push(`## Доска (задачи дерева)\n${boardSummary || '(нет данных)'}`);
   parts.push(`## Обживание (контур 2)\n${liveinSummary || '(не проводилось)'}`);

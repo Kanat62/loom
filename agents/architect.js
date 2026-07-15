@@ -29,6 +29,20 @@ function buildArchitectPrompt(brief, workspaceListing) {
   // когда явно похоже, что нужен инструмент — архитектор сам решает.
   const tools = listTools();
   parts.push(`## Реестр существующих инструментов (reuse-first — переиспользуй, не дублируй)\n${tools.length ? tools.map((t) => `- ${t.name} (v${t.version}): ${t.description}`).join('\n') : '(пока нет ни одного инструмента)'}`);
+  // §11, П§6.2: ingest ТЗ-пакета передаёт требования с id — каждая задача
+  // ОБЯЗАНА трассировать, какие требования она покрывает (covers), иначе
+  // harness не сможет отличить дыру («требование без задачи») от того, что
+  // архитектор просто забыл про него.
+  if (Array.isArray(brief.requirements) && brief.requirements.length) {
+    parts.push([
+      '## Требования ТЗ-пакета (§11, обязательна трассировка)',
+      brief.requirements.map((r) => `- ${r.id}: ${r.text}`).join('\n'),
+      'КАЖДАЯ задача ОБЯЗАНА включать поле "covers" — список id требований, которые',
+      'она закрывает (может быть несколько задач на одно требование, и наоборот).',
+      'Требование без единой покрывающей его задачи — дыра, о которой нужно честно',
+      'сообщить (harness сам это посчитает по covers, ты просто заполняй поле честно).',
+    ].join('\n'));
+  }
   parts.push(`## Текущие файлы workspace (только имена)\n${workspaceListing.length ? workspaceListing.join('\n') : '(пусто)'}`);
   return parts.join('\n\n');
 }
@@ -172,6 +186,7 @@ export async function runArchitect({
       ? JSON.stringify({ tool: t.tool_name, args: Array.isArray(t.tool_args) ? t.tool_args.map(String) : [] })
       : t.spec;
 
+    const covers = Array.isArray(t.covers) ? t.covers.filter((x) => typeof x === 'string') : [];
     const id = addTask({
       project_id: projectId,
       title: t.title,
@@ -183,9 +198,19 @@ export async function runArchitect({
       touches_files: Array.isArray(t.touches_files) ? t.touches_files : [],
       blocked_by_task_id: blockedById,
       deps: depIds.length ? depIds : undefined,
+      covers,
     });
     createdIds.push(id);
     titleToId.set(t.title, id);
+  }
+
+  // §11, П§6.2: требование без единой покрывающей его задачи — дыра,
+  // о которой сообщается человеку (не блокирует прогон — architect уже
+  // сделал свой выбор, это отчётность, не ворота).
+  let uncoveredRequirements = [];
+  if (Array.isArray(brief.requirements) && brief.requirements.length) {
+    const coveredIds = new Set(plan.tasks.flatMap((t) => (Array.isArray(t.covers) ? t.covers : [])));
+    uncoveredRequirements = brief.requirements.filter((r) => !coveredIds.has(r.id));
   }
 
   // Контракт регрессии (§8.9): последняя задача дерева — ТОЛЬКО повтор уже
@@ -230,5 +255,6 @@ export async function runArchitect({
     installOk: install.ok,
     installOutput: install.output,
     precheckLog,
+    uncoveredRequirements,
   };
 }

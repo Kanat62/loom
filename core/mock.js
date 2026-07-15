@@ -218,6 +218,25 @@ registerMockHandler('coder', ({ userMsg }) => {
     };
   }
 
+  // Фаза 7 (П§6.1): исследователь заказывает demo-fetch — детерминированный
+  // run.js, пишущий {count:3} в файл, указанный первым аргументом.
+  if (/^Инструмент demo-fetch:/.test(title)) {
+    return {
+      files: {
+        'run.js': [
+          "const fs = require('fs');",
+          'const [, , outFile] = process.argv;',
+          "fs.writeFileSync(outFile, JSON.stringify({ count: 3 }));",
+          '',
+        ].join('\n'),
+        'tool.json': `${JSON.stringify({
+          name: 'demo-fetch', version: 1, description: 'скачивает демо-данные в JSON (MOCK)',
+          args: ['outFile'], network: 'none', timeout_ms: 10000,
+        }, null, 2)}\n`,
+      },
+    };
+  }
+
   // Задача вне сценария калькулятора (например, evals/budget.js) — детерминированная
   // заглушка-файл, чтобы другие MOCK-прогоны могли переиспользовать этот хендлер,
   // не расширяя сам сценарий-эталон.
@@ -244,6 +263,11 @@ registerMockHandler('router', ({ userMsg }) => {
       complexity_score: { files: 1, lines: 3, trivial: true },
     };
   }
+  // Фаза 7 (П§6.1): маркер MOCK-сценария исследователя — симптом без готового
+  // решения, требует диагностики (protocol=problem), не хотелка.
+  if (/^ТЕСТ_ИССЛЕДОВАТЕЛЬ/.test(text)) {
+    return { route: 'problem', reason: 'клиент описывает боль, не решение — требует диагностики' };
+  }
   return { route: 'wish', reason: 'клиент описал желаемый результат нового продукта' };
 });
 
@@ -262,6 +286,39 @@ registerMockHandler('advisor', ({ userMsg, opts }) => {
   if (opts.json === false) {
     // advisor_analyst (question-протокол): обычный текст, не JSON.
     return 'Мок-аналитик: calc.js экспортирует функции add(a,b) и subtract(a,b) для сложения и вычитания.';
+  }
+
+  // --- Фаза 7 (П§6.2, §11): ingest ТЗ-пакета — разбор документа и поиск дыр.
+  // Требования узнаются по формату фикстур (строка "- текст" = требование) —
+  // намеренно НЕ завязано на конкретное содержимое фикстуры, тот же путь,
+  // которым размечен любой реальный документ в markdown/txt.
+  if (/^## Режим: разбор документа/.test(userMsg)) {
+    const requirements = [];
+    let n = 0;
+    for (const line of userMsg.split('\n')) {
+      const m = line.match(/^- (.+)$/);
+      if (m) { n += 1; requirements.push({ id: `R${n}`, text: m[1].trim() }); }
+    }
+    return { requirements };
+  }
+  if (/^## Режим: поиск дыр/.test(userMsg)) {
+    // Маркер TODO_HOLE в тексте требования (см. фикстуру evals/fixtures/
+    // spec-package/02-payment.md) — требование без проверяемого критерия,
+    // ровно то, что §11 велит ловить: "требование без критерия — дыра".
+    const holes = [];
+    const questions = [];
+    const reqRe = /^- (\S+) \([^)]*\): (.+)$/gm;
+    let m = reqRe.exec(userMsg);
+    while (m) {
+      const [, id, text] = m;
+      if (/TODO_HOLE/.test(text)) {
+        const clean = text.replace('TODO_HOLE', '').trim();
+        holes.push({ req_id: id, description: `требование "${clean}" не даёт числа/условия — непроверяемо` });
+        questions.push({ req_id: id, question: `Уточните измеримый критерий для: ${clean}` });
+      }
+      m = reqRe.exec(userMsg);
+    }
+    return { holes, contradictions: [], questions };
   }
 
   // evals/interview.js: маркер, который заставляет мок-советника СНАЧАЛА
@@ -292,6 +349,43 @@ registerMockHandler('advisor', ({ userMsg, opts }) => {
 // отвечать на эти title/spec, так что весь конвейер router→advisor→architect→
 // coordinator проверяется на одном известном продукте без дублирования логики.
 registerMockHandler('architect', ({ userMsg }) => {
+  // §11, П§6.2: ingest ТЗ-пакета — architect обязан трассировать covers.
+  // Намеренно НЕ покрываем ПОСЛЕДНЕЕ требование из списка — честная проверка,
+  // что harness ловит именно пропуск архитектора (отдельный класс дыры от
+  // TODO_HOLE, который уже поймал ingest ДО этого вызова).
+  if (/## Требования ТЗ-пакета/.test(userMsg)) {
+    const ids = [];
+    const reqRe = /^- (\S+): /gm;
+    let m = reqRe.exec(userMsg);
+    while (m) { ids.push(m[1]); m = reqRe.exec(userMsg); }
+    const covered = ids.slice(0, -1);
+    return {
+      packages: [],
+      tasks: [
+        {
+          title: 'calc.js: экспортирует add(a,b) и subtract(a,b)',
+          spec: 'Создай calc.js в корне workspace. module.exports = { add, subtract }. add(a,b)=a+b, subtract(a,b)=a-b.',
+          criteria: {
+            cmd: 'node -e "const c=require(\'./calc.js\'); const a=c.add(2,3), s=c.subtract(5,2); if(a===5 && s===3){console.log(\'PASS add=\'+a+\' subtract=\'+s)}else{console.error(\'FAIL: add(2,3)=\'+a+\' (ожидалось 5), subtract(5,2)=\'+s+\' (ожидалось 3)\'); process.exit(1)}"',
+          },
+          touches_files: ['calc.js'],
+          depends_on_title: null,
+          covers: covered,
+        },
+        {
+          title: 'index.html: калькулятор подключает calc.js и показывает 2+3 и 5-2',
+          spec: 'Создай index.html. Подключи calc.js через <script src="calc.js"></script>. В теле должны быть числа 5 и 3.',
+          criteria: {
+            cmd: 'node -e "const fs=require(\'fs\'); const h=fs.readFileSync(\'index.html\',\'utf8\'); const ok=h.includes(\'calc.js\')&&h.includes(\'5\')&&h.includes(\'3\'); if(ok){console.log(\'PASS html содержит calc.js и результаты\')}else{console.error(\'FAIL: index.html не содержит calc.js или результаты\'); process.exit(1)}"',
+          },
+          touches_files: ['index.html'],
+          depends_on_title: 'calc.js: экспортирует add(a,b) и subtract(a,b)',
+          covers: [],
+        },
+      ],
+    };
+  }
+
   // §26.6 Кузница: DAG tool → tool_run → project, читающий результат.
   if (/ТЕСТ_КУЗНИЦА/.test(userMsg)) {
     return {
@@ -405,6 +499,42 @@ registerMockHandler('cheap', ({ userMsg }) => {
     return { files };
   }
   return { has_technical_terms: containsTechnicalQuestion(userMsg) };
+});
+
+// --- Фаза 7 (П§6.1): researcher — план + оценка -----------------------------
+// Маркер отличия двух путей ('OK' vs 'NODATA') не может читаться из брифа на
+// звонке 2 (Звонок 2 по спеке видит ТОЛЬКО отчёты tool_run + глаза, не
+// исходный текст problem) — поэтому маркер прокидывается через args
+// tool_run'а, что попадает в title задачи, а title виден в отчёте ("##
+// Отчёт tool_run ...") — честно, без бокового канала мимо контракта.
+registerMockHandler('researcher', ({ userMsg }) => {
+  if (/^## Режим: план/.test(userMsg)) {
+    const noData = /ТЕСТ_ИССЛЕДОВАТЕЛЬ_НЕТ_ДАННЫХ/.test(userMsg);
+    return {
+      sources: [{ url: 'https://example.test/demo', what: 'демо-источник для MOCK', freshness_hint: 'раз в день' }],
+      need_tools: [{
+        tool_name: 'demo-fetch',
+        purpose: 'скачивает демо-данные в JSON',
+        io: 'outFile -> {count}',
+        criteria: {
+          cmd: "node -e \"const fs=require('fs');const{execFileSync}=require('child_process');try{execFileSync('node',['run.js','out.json']);}catch(e){console.error('FAIL: '+e.message);process.exit(1);}const r=JSON.parse(fs.readFileSync('out.json','utf8'));if(r.count===3){console.log('PASS count=3')}else{console.error('FAIL: '+JSON.stringify(r));process.exit(1)}\"",
+        },
+      }],
+      tool_runs: [{
+        tool: 'demo-fetch',
+        args: noData ? ['data.json', 'NODATA'] : ['data.json'],
+        data_criteria: [{ cmd: "node -e \"const fs=require('fs');if(fs.existsSync('data.json')){console.log('PASS data.json существует')}else{console.error('FAIL: data.json не создан');process.exit(1)}\"" }],
+      }],
+      data_criteria: [],
+    };
+  }
+  if (/^## Режим: оценка/.test(userMsg)) {
+    if (/NODATA/.test(userMsg)) {
+      return { verdict: 'data_unavailable', client_note: 'MOCK: этих данных не существует в открытом виде — демонстрация стоп-фактора §10.' };
+    }
+    return { verdict: 'proceed', data_summary: 'MOCK: 3 демо-записи добыты успешно из demo-fetch.', for_architect: 'Данные (3 демо-записи) лежат в data.json продукта — используй как есть.' };
+  }
+  throw new Error('mock.js: researcher — не распознан режим (план/оценка) в userMsg');
 });
 
 // --- Сценарий А (Фаза 1/2): голый координатор без советника/роутера -------
@@ -839,6 +969,165 @@ async function runParallelScenario() {
   console.log(`[mock] parallel OK — 8/8 merged с первой попытки, очередь мёржей последовательна (${mergedEvents.length} событий), оба воркера (${[...workersUsed].join(',')}) поучаствовали, конфликт shared.js разрешён reconciler'ом ("theirs"), итоговое содержимое: ${sharedContent.trim()}`);
 }
 
+// --- Сценарий З (§10, П§6.1): исследователь — proceed И жёсткий стоп-фактор ---
+async function runResearcherScenario() {
+  const {
+    newRunId, setRootSpec, getTask,
+  } = await import('./journal.js');
+  const { routeRequest } = await import('../agents/router.js');
+  const { startIntake, buildBrief, buildConsultantReport } = await import('../agents/advisor.js');
+  const { planResearch, evaluateResearch } = await import('../agents/researcher.js');
+  const { runArchitect } = await import('../agents/architect.js');
+  const { runCoordinatorLoop } = await import('./coordinator.js');
+  const { listWorkspaceFileNames } = await import('../agents/coder.js');
+  const { WORKSPACE } = await import('./config.js');
+  const fsMod = await import('node:fs');
+
+  if (fsMod.existsSync(WORKSPACE)) fsMod.rmSync(WORKSPACE, { recursive: true, force: true });
+
+  // --- Путь 1: данные найдены → proceed → доходит до отчёта с блоком данных ---
+  {
+    const runId = newRunId();
+    const text = 'ТЕСТ_ИССЛЕДОВАТЕЛЬ_OK: в КР растёт покупка-продажа демо-товара, не знаю что заказывать.';
+
+    const routed = await routeRequest({ text, workspaceFiles: listWorkspaceFileNames(WORKSPACE), runId });
+    if (routed.route !== 'problem') throw new Error(`researcher: ожидали route=problem, получили ${routed.route}`);
+
+    const { step } = await startIntake({ protocol: 'problem', initialText: text, runId });
+    if (step.type !== 'ready') throw new Error('researcher: мок-советник должен сразу вернуть ready для problem');
+
+    const brief = buildBrief({ protocol: 'problem', initialText: text, step });
+    setRootSpec('default', brief.summary, brief.engineering_defaults, 'problem');
+
+    const planResult = await planResearch({
+      brief, rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: 'default',
+    });
+    if (!planResult.ok) throw new Error(`researcher: план (путь OK) не удался: ${planResult.error}`);
+    if (planResult.empty) throw new Error('researcher: ожидали непустой план (need_tools/tool_runs)');
+    console.log(`[mock] researcher (OK): план — инструментов ${planResult.toolTaskIds.length}, запусков ${planResult.toolRunTaskIds.length}`);
+
+    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+
+    const toolRunTasks = planResult.toolRunTaskIds.map(getTask);
+    if (!toolRunTasks.every((t) => t.status === 'done')) {
+      throw new Error(`researcher: не все tool_run задачи (путь OK) дошли до done: ${toolRunTasks.map((t) => t.status).join(',')}`);
+    }
+
+    const evalResult = await evaluateResearch({
+      toolRunTaskIds: planResult.toolRunTaskIds, workspaceDir: WORKSPACE, runId,
+    });
+    if (!evalResult.ok) throw new Error(`researcher: оценка (путь OK) не удалась: ${evalResult.error}`);
+    if (evalResult.verdict !== 'proceed') throw new Error(`researcher: ожидали verdict=proceed, получили ${evalResult.verdict}`);
+    console.log(`[mock] researcher (OK): оценка — proceed, ${evalResult.dataSummary}`);
+
+    const fullBrief = { ...brief, summary: `${brief.summary}\n\n[Данные]\n${evalResult.forArchitect}` };
+    const architectResult = await runArchitect({
+      brief: fullBrief, workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: 'default',
+    });
+    if (!architectResult.ok) throw new Error(`researcher: architect после исследования не удался: ${architectResult.error}`);
+
+    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+    const allIds = [...architectResult.taskIds, architectResult.regressionId];
+    const finalTasks = allIds.map(getTask);
+    if (!finalTasks.every((t) => t.status === 'done')) {
+      throw new Error(`researcher: дерево архитектора после исследования не дошло до done: ${finalTasks.map((t) => t.status).join(',')}`);
+    }
+
+    const report = await buildConsultantReport({
+      protocol: 'problem', rootSpec: fullBrief.summary, engineeringDefaults: brief.engineering_defaults,
+      problem: brief.problem, boardSummary: `${allIds.length} задач в дереве`, liveinSummary: '(не проводилось в этом сценарии)',
+      dataSources: evalResult.dataSummary, runId,
+    });
+    if (typeof report !== 'string' || !report.trim()) throw new Error('researcher: пустой отчёт консультанта (путь OK)');
+    console.log('[mock] researcher OK (proceed) — problem-маршрут доходит до отчёта консультанта с данными.');
+  }
+
+  // --- Путь 2: данные недоступны → жёсткий стоп-фактор, архитектор НЕ вызывается ---
+  {
+    const runId = newRunId();
+    const text = 'ТЕСТ_ИССЛЕДОВАТЕЛЬ_НЕТ_ДАННЫХ: в КР растёт покупка-продажа демо-товара, не знаю что заказывать.';
+
+    const routed = await routeRequest({ text, workspaceFiles: listWorkspaceFileNames(WORKSPACE), runId });
+    if (routed.route !== 'problem') throw new Error(`researcher: (путь NODATA) ожидали route=problem, получили ${routed.route}`);
+
+    const { step } = await startIntake({ protocol: 'problem', initialText: text, runId });
+    const brief = buildBrief({ protocol: 'problem', initialText: text, step });
+
+    const planResult = await planResearch({
+      brief, rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: 'default',
+    });
+    if (!planResult.ok) throw new Error(`researcher: план (путь NODATA) не удался: ${planResult.error}`);
+
+    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+
+    const evalResult = await evaluateResearch({
+      toolRunTaskIds: planResult.toolRunTaskIds, workspaceDir: WORKSPACE, runId,
+    });
+    if (!evalResult.ok) throw new Error(`researcher: оценка (путь NODATA) не удалась: ${evalResult.error}`);
+    if (evalResult.verdict !== 'data_unavailable') {
+      throw new Error(`researcher: ожидали verdict=data_unavailable, получили ${evalResult.verdict}`);
+    }
+    if (!evalResult.clientNote || !evalResult.clientNote.trim()) {
+      throw new Error('researcher: client_note пуст при data_unavailable — §10 требует дословный текст человеку');
+    }
+    console.log(`[mock] researcher (NODATA): стоп-фактор сработал — client_note: "${evalResult.clientNote}"`);
+    console.log('[mock] researcher OK (data_unavailable) — жёсткий стоп-фактор §10, архитектор НЕ вызывается (ветки «продолжить без данных» структурно нет).');
+  }
+}
+
+// --- Сценарий (§11, П§6.2): ingest ТЗ-пакета — дыра поймана ДО архитектора --
+// --- (TODO_HOLE), непокрытое требование поймано ПОСЛЕ архитектора (covers) -
+async function runIngestScenario() {
+  const { newRunId, getTask } = await import('./journal.js');
+  const { runIngest } = await import('../agents/ingest.js');
+  const { runArchitect } = await import('../agents/architect.js');
+  const { runCoordinatorLoop } = await import('./coordinator.js');
+  const { listWorkspaceFileNames } = await import('../agents/coder.js');
+  const { WORKSPACE, ROOT } = await import('./config.js');
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+
+  if (fsMod.existsSync(WORKSPACE)) fsMod.rmSync(WORKSPACE, { recursive: true, force: true });
+
+  const runId = newRunId();
+  const folderPath = pathMod.join(ROOT, 'evals', 'fixtures', 'spec-package');
+  const result = await runIngest({ folderPath, runId });
+  if (!result.ok) throw new Error(`ingest: сбой разбора пакета: ${result.error}`);
+  if (result.docs.length !== 3) throw new Error(`ingest: ожидали 3 документа, получили ${result.docs.length}`);
+  if (result.requirements.length !== 6) throw new Error(`ingest: ожидали 6 требований, получили ${result.requirements.length}`);
+  console.log(`[mock] ingest: документов ${result.docs.length}, требований ${result.requirements.length}`);
+
+  if (result.holes.length !== 1) throw new Error(`ingest: ожидали ровно 1 нарочную дыру (TODO_HOLE), нашли ${result.holes.length}`);
+  if (result.holes[0].req_id !== '02-payment.md:R2') {
+    throw new Error(`ingest: дыра найдена не там, где посажена: ${result.holes[0].req_id}`);
+  }
+  if (result.questions.length !== 1) throw new Error(`ingest: ожидали 1 вопрос по дыре, получили ${result.questions.length}`);
+  console.log(`[mock] ingest: нарочная дыра поймана — [${result.holes[0].req_id}] ${result.holes[0].description}, вопрос: "${result.questions[0].question}"`);
+
+  const architectResult = await runArchitect({
+    brief: {
+      protocol: 'spec', request: 'ingest fixture', summary: result.combinedText, engineering_defaults: [], requirements: result.requirements,
+    },
+    workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: 'default',
+  });
+  if (!architectResult.ok) throw new Error(`ingest: architect не удался: ${architectResult.error}`);
+  if (architectResult.uncoveredRequirements.length !== 1) {
+    throw new Error(`ingest: ожидали ровно 1 непокрытое требование (намеренный пропуск в mock-architect), получили ${architectResult.uncoveredRequirements.length}`);
+  }
+  if (architectResult.uncoveredRequirements[0].id !== '03-design.txt:R1') {
+    throw new Error(`ingest: непокрытое требование не то, что ожидалось: ${architectResult.uncoveredRequirements[0].id}`);
+  }
+  console.log(`[mock] ingest: architect не покрыл требование [${architectResult.uncoveredRequirements[0].id}] — трассировка covers честно это поймала.`);
+
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+  const allIds = [...architectResult.taskIds, architectResult.regressionId];
+  const finalTasks = allIds.map(getTask);
+  if (!finalTasks.every((t) => t.status === 'done')) {
+    throw new Error(`ingest: дерево не дошло до done: ${finalTasks.map((t) => t.status).join(',')}`);
+  }
+  console.log('[mock] ingest OK — дыра ТЗ поймана до архитектора, непокрытое требование поймано после архитектора (covers), дерево done.');
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -874,6 +1163,8 @@ async function main() {
     ['project pipeline: wish → router/advisor/architect/coordinator/skill (Фаза 3)', runProjectPipelineScenario],
     ['Кузница инструментов: word-count (§26.6)', runForgeScenario],
     ['параллельность: 8 задач / 2 воркера + конфликт + tsc-ворота (§16, П§5)', runParallelScenario],
+    ['исследователь: proceed с данными + жёсткий стоп-фактор data_unavailable (§10, П§6.1)', runResearcherScenario],
+    ['ingest ТЗ-пакета: дыра TODO_HOLE + непокрытое требование (§11, П§6.2)', runIngestScenario],
     ['tweak: router пишет критерий сам (Фаза 3)', runTweakScenario],
     ['question: read-only аналитик, без задач (Фаза 3)', runQuestionScenario],
     ['path-lock: запись вне workspace блокируется и логируется (Фаза 4)', runPathLockScenario],

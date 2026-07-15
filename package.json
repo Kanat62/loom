@@ -7,13 +7,16 @@
   "scripts": {
     "talk": "node --env-file=.env --no-warnings bin/talk.js",
     "cli": "node --env-file=.env --no-warnings bin/cli.js",
+    "ingest": "node --env-file=.env --no-warnings bin/ingest.js",
     "resume": "node --env-file=.env --no-warnings bin/resume.js",
     "ask": "node --env-file=.env --no-warnings bin/ask.js",
     "mock": "node --env-file=.env --env-file=.env.mock --no-warnings core/mock.js",
     "race": "node --env-file=.env --env-file=.env.mock --no-warnings evals/race.js",
     "budget-eval": "node --env-file=.env --env-file=.env.mock --no-warnings evals/budget.js",
     "interview-eval": "node --env-file=.env --no-warnings evals/interview.js",
-    "interview-eval:mock": "node --env-file=.env --env-file=.env.mock --no-warnings evals/interview.js"
+    "interview-eval:mock": "node --env-file=.env --env-file=.env.mock --no-warnings evals/interview.js",
+    "bank": "node --env-file=.env --no-warnings evals/bank.js",
+    "bank:mock": "node --env-file=.env --env-file=.env.mock --no-warnings evals/bank.js"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.3.0",

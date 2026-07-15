@@ -101,6 +101,9 @@ function migrate(d) {
   // tasks.tool_name — существующие БД до этой правки не имеют колонки
   // (26.2: связывает type='tool'/'tool_run' задачу с записью в tools).
   ensureColumn(d, 'tasks', 'tool_name', 'tool_name TEXT');
+  // tasks.covers — П§6.2 (§11): трассировка требование→задача для ingest
+  // ТЗ-пакета. JSON-массив req id ('файл.md:R1'), '[]' для задач вне ingest.
+  ensureColumn(d, 'tasks', 'covers', "covers TEXT DEFAULT '[]'");
 }
 
 function jsonOrNull(v) {
@@ -128,8 +131,8 @@ export function addTask(t) {
     INSERT INTO tasks
       (id, project_id, title, spec, criteria, role, type, status,
        touches_files, touches_functions, blocked_by_task_id,
-       budget_usd, spent_usd, claimed_by, attempts, feedback, question, created_at, tool_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       budget_usd, spent_usd, claimed_by, attempts, feedback, question, created_at, tool_name, covers)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     t.project_id || 'default',
@@ -150,6 +153,7 @@ export function addTask(t) {
     t.question || null,
     Date.now(),
     t.tool_name || null,
+    jsonOrNull(t.covers) || '[]',
   );
   if (Array.isArray(t.deps) && t.deps.length) {
     const depStmt = db().prepare('INSERT OR IGNORE INTO task_deps (task_id, blocked_by) VALUES (?, ?)');

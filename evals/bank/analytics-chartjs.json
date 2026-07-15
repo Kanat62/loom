@@ -1,0 +1,7 @@
+{
+  "input": "Хочу страницу аналитики по откликам клиентов — график по дням, класс-обёртка на Chart.js.",
+  "route_expected": "wish",
+  "protocol_expected": "wish",
+  "min_tasks": 1,
+  "forbidden_in_interview": ["px", "ms", "api", "fps", "порт", "endpoint", "фреймворк"]
+}

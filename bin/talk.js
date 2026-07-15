@@ -13,6 +13,8 @@ import { routeRequest } from '../agents/router.js';
 import { runArchitect } from '../agents/architect.js';
 import { listWorkspaceFileNames } from '../agents/coder.js';
 import { runLivein } from '../agents/livein.js';
+import { planResearch, evaluateResearch } from '../agents/researcher.js';
+import { runIngest } from '../agents/ingest.js';
 import { runCoordinatorLoop } from '../core/coordinator.js';
 import {
   addTask, getTask, listTasks, releaseStuck, newRunId, setRootSpec, getRootSpec,
@@ -172,6 +174,63 @@ async function runProjectFlow(protocol, initialText, runId) {
   // Архитектор получает ПОЛНУЮ (объединённую) картину продукта, не только
   // новый инкремент — иначе он тоже забудет более ранние решения.
   const fullBrief = { ...brief, summary: merged.spec, engineering_defaults: merged.engineeringDefaults };
+
+  // Исследователь (§10, П§6.1) — только для problem-входа: советник уже
+  // диагностировал проблему, теперь честно проверяем, доступны ли данные,
+  // ДО того, как архитектор спроектирует решение вокруг данных, которых
+  // может не существовать. Жесточайший стоп-фактор: data_unavailable →
+  // проект blocked_needs_human, архитектор НЕ вызывается — ветки
+  // «продолжить без данных» здесь структурно нет.
+  let dataSummaryForReport = null;
+  if (protocol === 'problem') {
+    console.log('\n[researcher] оцениваю доступность данных...');
+    const planResult = await planResearch({
+      brief: fullBrief, rootSpec: merged.spec, workspaceDir: WORKSPACE, runId, projectId: 'default',
+    });
+    if (!planResult.ok) {
+      console.log(`\nИсследователь не смог построить план добычи данных: ${planResult.error}`);
+      printRunTokenSummary(runId);
+      return;
+    }
+    if (!planResult.empty) {
+      console.log(`[researcher] заказано: инструментов ${planResult.toolTaskIds.length}, запусков добычи ${planResult.toolRunTaskIds.length}`);
+      (planResult.precheckLog || []).forEach((l) => console.log(`  ${l}`));
+      await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+
+      const evalResult = await evaluateResearch({
+        toolRunTaskIds: planResult.toolRunTaskIds, workspaceDir: WORKSPACE, runId,
+      });
+      if (!evalResult.ok) {
+        console.log(`\nИсследователь не смог оценить добытые данные: ${evalResult.error}`);
+        printRunTokenSummary(runId);
+        return;
+      }
+      if (evalResult.verdict === 'data_unavailable') {
+        console.log(`\n[researcher] ${evalResult.clientNote}`);
+        console.log('\nПроект остановлен — данные недоступны (см. выше). Архитектор не вызывается, это честный итог, не сбой.');
+        printRunTokenSummary(runId);
+        return;
+      }
+      dataSummaryForReport = evalResult.dataSummary;
+      fullBrief.summary = `${fullBrief.summary}\n\n[Данные, добытые исследователем]\n${evalResult.forArchitect}`;
+    }
+  }
+
+  await runBuildFlow({
+    protocol, brief, merged, fullBrief, runId, dataSummaryForReport,
+  });
+}
+
+/**
+ * Общий хвост project/spec-потока — architect → coordinator → live_in →
+ * отчёт консультанта → публикация (§9/§17/Фаза 5). Выделен из runProjectFlow
+ * (П§6.2), потому что /ingest (§11) строит fullBrief по-своему (требования
+ * ТЗ-пакета вместо интервью советника), но дальше идёт ТОТ ЖЕ конвейер —
+ * дублировать его копипастой означало бы неизбежное расхождение при правках.
+ */
+async function runBuildFlow({
+  protocol, brief, merged, fullBrief, runId, dataSummaryForReport,
+}) {
   const workspaceListing = listWorkspaceFileNames(WORKSPACE);
   const architectResult = await runArchitect({
     brief: fullBrief, workspaceDir: WORKSPACE, workspaceListing, runId, projectId: 'default',
@@ -183,6 +242,10 @@ async function runProjectFlow(protocol, initialText, runId) {
   }
   console.log(`\nСоздано задач: ${architectResult.taskIds.length} + регрессия. Пакеты: ${architectResult.packages.join(', ') || '(нет)'}`);
   architectResult.precheckLog.forEach((l) => console.log(`  ${l}`));
+  if (architectResult.uncoveredRequirements?.length) {
+    console.log('\n⚠ Требования ТЗ-пакета без покрывающей задачи (дыра в плане архитектора):');
+    for (const r of architectResult.uncoveredRequirements) console.log(`  - [${r.id}] ${r.text}`);
+  }
 
   await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
   printStatus();
@@ -219,7 +282,8 @@ async function runProjectFlow(protocol, initialText, runId) {
   console.log('\n--- Отчёт консультанта ---');
   const report = await buildConsultantReport({
     protocol, rootSpec: merged.spec, engineeringDefaults: merged.engineeringDefaults,
-    problem: brief.problem, boardSummary: boardSummaryText(allTreeIds), liveinSummary, runId,
+    problem: brief.problem, boardSummary: boardSummaryText(allTreeIds), liveinSummary,
+    dataSources: dataSummaryForReport, runId,
   });
   console.log(report);
   publishToGithub(merged.spec);
@@ -279,6 +343,66 @@ async function runTweakFlow(text, criteria, runId, verification = false) {
   printRunTokenSummary(runId);
 }
 
+/**
+ * /ingest <папка> (§11, П§6.2): приём ТЗ-пакета. Разбор документов → свод
+ * требований → поиск дыр/противоречий → вопросы клиенту ТОЛЬКО по дырам
+ * (тот же принцип, что у интервью советника) → root_spec пополняется
+ * (ТЗ-текст + ответы клиента) → общий хвост runBuildFlow (архитектор
+ * получает требования с id и обязан трассировать covers).
+ */
+async function runIngestFlow(folderPath) {
+  if (!folderPath || !fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+    console.log(`\n/ingest: папка не найдена: ${folderPath || '(путь не указан)'}`);
+    return;
+  }
+  const runId = newRunId();
+  console.log(`\n[ingest] читаю пакет документов: ${folderPath}`);
+  const result = await runIngest({ folderPath, runId });
+  if (!result.ok) {
+    console.log(`\n[ingest] сбой: ${result.error}`);
+    printRunTokenSummary(runId);
+    return;
+  }
+  (result.parseErrors || []).forEach((e) => console.log(`  ${e}`));
+  console.log(`[ingest] документов: ${result.docs.length}, требований: ${result.requirements.length}`);
+
+  if (result.holes.length || result.contradictions.length) {
+    console.log('\n--- Дыры и противоречия в ТЗ ---');
+    for (const h of result.holes) console.log(`  ⚠ дыра [${h.req_id}]: ${h.description}`);
+    for (const c of result.contradictions) console.log(`  ⚠ противоречие [${(c.req_ids || []).join(', ')}]: ${c.description}`);
+  } else {
+    console.log('\n[ingest] дыр и противоречий не найдено.');
+  }
+
+  const answers = [];
+  for (const q of result.questions) {
+    // eslint-disable-next-line no-await-in-loop
+    const reply = sanitizeLine(await question(`\n[дыра ${q.req_id}] ${q.question}\n> `));
+    if (reply) answers.push(`[${q.req_id}] ${q.question} → ${reply}`);
+  }
+
+  const existingRootSpec = getRootSpec('default');
+  const existingDefaults = existingRootSpec?.engineering_defaults
+    ? JSON.parse(existingRootSpec.engineering_defaults) : [];
+  const summary = [
+    'ТЗ-пакет (ingest):',
+    result.combinedText || '(документы не содержали проверяемых требований)',
+    answers.length ? `\nОтветы клиента на дыры/противоречия:\n${answers.join('\n')}` : '',
+  ].join('\n');
+  const merged = mergeRootSpec(existingRootSpec, summary, existingDefaults);
+  setRootSpec('default', merged.spec, merged.engineeringDefaults, 'spec');
+  backupWorkspaceHistory('spec');
+
+  const brief = {
+    protocol: 'spec', request: `/ingest ${folderPath}`, summary: merged.spec, engineering_defaults: merged.engineeringDefaults, problem: null,
+  };
+  const fullBrief = { ...brief, requirements: result.requirements };
+
+  await runBuildFlow({
+    protocol: 'spec', brief, merged, fullBrief, runId, dataSummaryForReport: null,
+  });
+}
+
 async function handleLine(rawLine) {
   const line = sanitizeLine(rawLine);
   if (!line) return;
@@ -290,6 +414,10 @@ async function handleLine(rawLine) {
     console.log(`\n[resume] возвращено в pending: ${n}`);
     await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
     printStatus();
+    return;
+  }
+  if (line.startsWith('/ingest ')) {
+    await runIngestFlow(line.slice('/ingest '.length).trim());
     return;
   }
 
