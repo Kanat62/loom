@@ -370,6 +370,46 @@ registerMockHandler('advisor', ({ userMsg, opts }) => {
   };
 });
 
+// --- §28.2: spec_writer ------------------------------------------------------
+// 3 требования, все 8 секций заполнены — то же "детерминированное ТЗ", что
+// §28.6 п.1 требует для happy-path сценария Stage B. Маркер ТЕСТ_ТЗ_БЕЗ_РАМОК
+// в тексте брифа управляет структурным браком (секция "За рамками" опущена
+// целиком) — намеренно НЕ чинится на повторной попытке (в отличие от
+// designer'а §27.2, здесь §28.6 п.3 описывает только "всегда сломан" кейс).
+const MOCK_TZ_REQUIREMENTS = [
+  { id: 'REQ-1', text: 'Пользователь может сложить два числа и увидеть результат.', priority: 'must' },
+  { id: 'REQ-2', text: 'Пользователь может вычесть одно число из другого и увидеть результат.', priority: 'must' },
+  { id: 'REQ-3', text: 'Интерфейс отображается корректно на мобильном экране 375px.', priority: 'should' },
+];
+
+function buildMockTzMd(requirements, { omitScope = false } = {}) {
+  const reqLines = requirements.map((r) => `- **${r.id}** (${r.priority}): ${r.text}`).join('\n');
+  const sections = [
+    ['1. Цель и пользователи', 'Простой калькулятор для сложения и вычитания двух чисел; пользователь — рядовой посетитель веб-страницы.'],
+    ['2. Функциональные требования', reqLines],
+    ['3. Нефункциональные требования', 'Работает в любом современном браузере без установки.'],
+    ['4. Экраны и сценарии', 'Одна страница: два поля ввода, кнопки «Сложить»/«Вычесть», результат под кнопками.'],
+    ['5. Данные', 'Данных нет — вычисления только на клиенте, ничего не сохраняется и никуда не передаётся.'],
+    ['6. Приёмка', 'Клиент вводит два числа, нажимает кнопку и видит верный результат сложения/вычитания.'],
+    ['7. За рамками', 'История вычислений, авторизация пользователей, серверная часть — сознательно не делаем в этой версии.'],
+    ['8. Открытые вопросы', '(нет открытых вопросов)'],
+  ];
+  return sections
+    .filter(([title]) => !(omitScope && title === '7. За рамками'))
+    .map(([title, body]) => `## ${title}\n${body}`)
+    .join('\n\n');
+}
+
+registerMockHandler('spec_writer', ({ userMsg }) => {
+  const omitScope = /ТЕСТ_ТЗ_БЕЗ_РАМОК/.test(userMsg);
+  const requirements = MOCK_TZ_REQUIREMENTS;
+  return {
+    tz_md: buildMockTzMd(requirements, { omitScope }),
+    requirements,
+    open_questions: [],
+  };
+});
+
 // --- §27.2: designer --------------------------------------------------------
 // Валидные токены по умолчанию; маркеры в brief.request управляют веткой
 // "битых" токенов (тот же приём, что ТЕСТ_БРАК_КРИТЕРИЯ_*/ТЕСТ_КУЗНИЦА выше —
@@ -1731,6 +1771,64 @@ async function runDomainGateScenario() {
   fsMod.rmSync(scratch, { recursive: true, force: true });
 }
 
+// --- Сценарий (§28.2/28.6 п.3): spec_writer — запись ТЗ на успехе, --------
+// структурный брак (нет секции «За рамками») ловится ДО записи, ровно одна
+// повторная попытка, если брак повторился — жёсткий останов, ничего не
+// пишется (та же лестница, что designer §27.2) -----------------------------
+async function runSpecWriterScenario() {
+  const { runSpecWriter } = await import('../agents/specwriter.js');
+  const { newRunId, listEvents } = await import('./journal.js');
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+  const osMod = await import('node:os');
+
+  // --- Успех: валидное ТЗ реально пишется в workspaceDir/docs/TZ.md -------
+  const scratch = pathMod.join(osMod.tmpdir(), `loom-specwriter-scratch-${process.pid}`);
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+  fsMod.mkdirSync(scratch, { recursive: true });
+
+  const goodBrief = {
+    protocol: 'wish', request: 'Хочу простой калькулятор с веб-страницей', summary: 'Калькулятор', engineering_defaults: ['Один HTML-файл, чистый JS'],
+  };
+  const goodResult = await runSpecWriter({
+    brief: goodBrief,
+    transcript: [{ role: 'client', text: 'Хочу простой калькулятор с веб-страницей' }],
+    workspaceDir: scratch,
+    runId: newRunId(),
+  });
+  if (!goodResult.ok || !goodResult.tzPath) {
+    throw new Error(`spec_writer: валидное ТЗ обязано пройти и вернуть tzPath, получили ${JSON.stringify(goodResult)}`);
+  }
+  if (!fsMod.existsSync(pathMod.join(scratch, 'docs', 'TZ.md'))) {
+    throw new Error('spec_writer: TZ.md обязан появиться в workspaceDir/docs/TZ.md');
+  }
+  if (goodResult.requirements.length !== 3) {
+    throw new Error(`spec_writer: ожидали 3 требования из мок-ветки, получили ${goodResult.requirements.length}`);
+  }
+  console.log(`[mock] spec_writer: валидное ТЗ записано в ${goodResult.tzPath}, требований: ${goodResult.requirements.length}.`);
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+
+  // --- Структурный брак: секция "За рамками" отсутствует ОБА раза ---------
+  const brokenBrief = {
+    protocol: 'wish', request: 'ТЕСТ_ТЗ_БЕЗ_РАМОК: калькулятор', summary: 'Калькулятор', engineering_defaults: [],
+  };
+  const runId = newRunId();
+  const before = listEvents({ run_id: runId, agent: 'spec_writer', type: 'usage' }).length;
+
+  const brokenResult = await runSpecWriter({ brief: brokenBrief, transcript: [], runId });
+  if (brokenResult.ok) {
+    throw new Error(`spec_writer: ТЗ без секции "За рамками" ДВАЖДЫ обязано провалить runSpecWriter (ok:false), получили ${JSON.stringify(brokenResult)}`);
+  }
+  if (!/За рамками/.test(brokenResult.error)) {
+    throw new Error(`spec_writer: причина провала обязана называть отсутствующую секцию, получили: ${brokenResult.error}`);
+  }
+  const after = listEvents({ run_id: runId, agent: 'spec_writer', type: 'usage' }).length;
+  if (after - before !== 2) {
+    throw new Error(`spec_writer: обязана быть ровно одна повторная попытка (2 вызова модели всего), получили ${after - before}`);
+  }
+  console.log(`[mock] spec_writer structural defect OK — ${brokenResult.error} — ровно одна повторная попытка, ничего не записано.`);
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -1780,6 +1878,7 @@ async function main() {
     ['designer: валидные токены, доставка кодеру, повторный вызов не переиздаёт (§27.2)', runDesignerScenario],
     ['designer: валидация токенов харнессом до записи — чинится/остаётся битым (§27.2)', runDesignerValidationScenario],
     ['доменный тег: явный домен побеждает эвристику, non-ui не тратит designer (§27.1)', runDomainGateScenario],
+    ['spec_writer: запись ТЗ на успехе + структурный брак без "За рамками" → жёсткий останов (§28.2)', runSpecWriterScenario],
   ];
 
   let failed = false;

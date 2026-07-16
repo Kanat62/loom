@@ -27,6 +27,10 @@ export const ROLES = {
   // проект, его выход входит в контекст ВСЕХ последующих UI-задач,
   // экономить здесь — ложная экономия.
   designer:   ['claude-cli:opus'],
+  // spec_writer (§28.2): та же логика, что у designer — один вызов на
+  // проект, выход которого становится законом для всех последующих ролей
+  // (советник, дизайнер, архитектор), экономить здесь — ложная экономия.
+  spec_writer: ['claude-cli:opus'],
 };
 
 // THINKING per-role: reasoning выключен для лёгких быстрых ролей (шрам 14).
@@ -40,6 +44,7 @@ export const THINKING = {
   live_in: true,
   researcher: true,
   designer: true,
+  spec_writer: true,
 };
 
 // Условные цены (USD за 1M токенов) — claude-cli подписка не биллит по токену,
