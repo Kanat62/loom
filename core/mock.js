@@ -46,7 +46,7 @@ export function registerMockHandler(role, fn) {
 // Задачи различаются по содержимому userMsg (заголовок задачи виден в
 // "## Задача"), не по глобальному счётчику вызовов — так сценарий не зависит
 // от порядка обработки очереди координатором.
-registerMockHandler('coder', ({ userMsg }) => {
+registerMockHandler('coder', ({ userMsg, idx }) => {
   // ВАЖНО: матчим по title из "## Задача", а не по всему userMsg — секция
   // критерия часто содержит имена файлов (readFileSync('calc.js')), что даёт
   // ложные срабатывания, если смотреть на весь текст промпта.
@@ -146,6 +146,23 @@ registerMockHandler('coder', ({ userMsg }) => {
   // логируется — мок-кодер намеренно ведёт себя как «злой»/сломанный агент.
   if (/ТЕСТ_ПУТЬ_НАРУШЕНИЕ/.test(title)) {
     return { files: { '../evil.js': "console.log('escaped workspace');\n" } };
+  }
+
+  // scar 34 (П§11): критерий сломан (задвоенное экранирование regex, тот же
+  // класс бага, что в реальном инциденте со змейкой) — правильный код НИКОГДА
+  // не пройдёт эту проверку. Контент варьируется по idx (глобальный счётчик
+  // вызовов роли coder), чтобы git tree-хэш РЕАЛЬНО отличался между попытками
+  // — иначе детектор корректно отказался бы подозревать критерий («код не
+  // менялся» — тоже законный повод не чинить).
+  if (/ТЕСТ_БРАК_КРИТЕРИЯ_ЧИНИМ/.test(title)) {
+    return { files: { 'notes.txt': `запись номер ${idx}\n` } };
+  }
+  // scar 34: критерий ЗДЕСЬ верный (SECRET_WORD достижим), но мок-кодер
+  // каждый раз честно НЕ пишет его — эмулирует «код правда не так», чтобы
+  // проверить, что эвристика (одинаковый провал + разный код) сама по себе
+  // НЕ чинит рабочий критерий — решает архитектор-ревьюер.
+  if (/ТЕСТ_БРАК_КРИТЕРИЯ_ПОДТВЕРЖДАЕМ/.test(title)) {
+    return { files: { 'notes2.txt': `попытка номер ${idx}, слова нет\n` } };
   }
 
   // §26.6 Кузница: инструмент word-count. Первая попытка — нарочная ошибка
@@ -348,7 +365,28 @@ registerMockHandler('advisor', ({ userMsg, opts }) => {
 // Переиспользует сценарий калькулятора — тот же MOCK_HANDLERS.coder уже умеет
 // отвечать на эти title/spec, так что весь конвейер router→advisor→architect→
 // coordinator проверяется на одном известном продукте без дублирования логики.
-registerMockHandler('architect', ({ userMsg }) => {
+registerMockHandler('architect', ({ userMsg, opts }) => {
+  // scar 34 (П§11): agents/architect.js:reviewCriterion() — отдельный
+  // JSON-контракт поверх ТОГО ЖЕ architect.md (симметрично regenerateCriteria
+  // выше — «фиктивный критерий»), различается по opts.agent, не по title,
+  // т.к. это НЕ вызов планирования дерева.
+  if (opts?.agent === 'architect_criteria_review') {
+    if (/ТЕСТ_БРАК_КРИТЕРИЯ_ЧИНИМ/.test(userMsg)) {
+      return {
+        verdict: 'criterion_defect',
+        cmd: 'node -e "const fs=require(\'fs\');const t=fs.readFileSync(\'notes.txt\',\'utf8\');if(/\\d/.test(t)){console.log(\'PASS notes.txt содержит цифру\')}else{console.error(\'FAIL: notes.txt должен содержать цифру, got: \'+JSON.stringify(t));process.exit(1)}"',
+        reason: 'MOCK: в исходном критерии было задвоенное экранирование (совпадает с буквальным \\d, не с цифрой) — заменено на одинарное.',
+      };
+    }
+    if (/ТЕСТ_БРАК_КРИТЕРИЯ_ПОДТВЕРЖДАЕМ/.test(userMsg)) {
+      return {
+        verdict: 'confirmed_block',
+        reason: 'MOCK: критерий требует SECRET_WORD — текст корректен и достижим правильным кодом, дело в коде, не в проверке.',
+      };
+    }
+    return { verdict: 'confirmed_block', reason: 'MOCK: дефолтная ветка ревью критерия — блок остаётся (консервативный дефолт).' };
+  }
+
   // §11, П§6.2: ingest ТЗ-пакета — architect обязан трассировать covers.
   // Намеренно НЕ покрываем ПОСЛЕДНЕЕ требование из списка — честная проверка,
   // что harness ловит именно пропуск архитектора (отдельный класс дыры от
@@ -751,6 +789,86 @@ async function runPathLockScenario() {
   console.log('[mock] path-lock OK — запись вне workspace заблокирована и залогирована событием path_lock_blocked.');
 }
 
+// --- Сценарий (scar 34, П§11): подозрение на брак критерия ----------------
+// Две задачи: ЧИНИМ — критерий сломан (задвоенный regex, тот же класс бага,
+// что реальный инцидент со змейкой: работающий код не мог пройти проверку
+// НИКОГДА) — эвристика находит одинаковый провал при разном коде, архитектор
+// подтверждает поломку и чинит критерий, дерево доходит до done с первой
+// попытки ПОСЛЕ починки. ПОДТВЕРЖДАЕМ — критерий корректен, код мок-кодера
+// каждый раз честно не соответствует ему — эвристика подозревает то же
+// самое (одинаковый провал + разный код), но архитектор-ревьюер отклоняет
+// «починку»: задача остаётся blocked_needs_human, как обычно.
+async function runCriteriaDefectScenario() {
+  const {
+    addTask, getTask, listEvents,
+  } = await import('./journal.js');
+  const { runCoordinatorLoop } = await import('./coordinator.js');
+  const { WORKSPACE } = await import('./config.js');
+
+  const eventNames = (taskId) => listEvents({ task_id: taskId }).map((e) => {
+    try { return JSON.parse(e.payload || '{}').event; } catch { return null; }
+  });
+
+  const titleRepair = 'ТЕСТ_БРАК_КРИТЕРИЯ_ЧИНИМ: notes.txt с цифрой';
+  const idRepair = addTask({
+    title: titleRepair,
+    spec: 'Создай notes.txt с любым текстом, содержащим хотя бы одну цифру.',
+    criteria: JSON.stringify({
+      // Реальный класс бага (scar 34): /\\d/ (два реальных бэкслеша) ищет
+      // буквальную подстроку "\d", а не цифру — правильный код пройти НЕ МОЖЕТ.
+      cmd: 'node -e "const fs=require(\'fs\');const t=fs.readFileSync(\'notes.txt\',\'utf8\');if(/\\\\d/.test(t)){console.log(\'PASS\')}else{console.error(\'FAIL: notes.txt должен содержать цифру, got: \'+JSON.stringify(t));process.exit(1)}"',
+    }),
+    role: 'coder',
+    type: 'project',
+    budget_usd: 100,
+  });
+
+  const titleConfirm = 'ТЕСТ_БРАК_КРИТЕРИЯ_ПОДТВЕРЖДАЕМ: notes2.txt с SECRET_WORD';
+  const idConfirm = addTask({
+    title: titleConfirm,
+    spec: 'Создай notes2.txt, содержащий слово SECRET_WORD.',
+    criteria: JSON.stringify({
+      cmd: 'node -e "const fs=require(\'fs\');const t=fs.readFileSync(\'notes2.txt\',\'utf8\');if(t.includes(\'SECRET_WORD\')){console.log(\'PASS\')}else{console.error(\'FAIL: notes2.txt не содержит SECRET_WORD\');process.exit(1)}"',
+    }),
+    role: 'coder',
+    type: 'project',
+    budget_usd: 100,
+  });
+
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+
+  const repaired = getTask(idRepair);
+  console.log(`[mock] criteria-defect (чиним): status=${repaired.status} attempts=${repaired.attempts}`);
+  if (repaired.status !== 'done') {
+    throw new Error(`criteria-defect (чиним): ожидали done после починки критерия архитектором, получили ${repaired.status}`);
+  }
+  const repairEvents = eventNames(idRepair);
+  if (!repairEvents.includes('criteria_defect_suspected')) {
+    throw new Error('criteria-defect (чиним): событие criteria_defect_suspected не найдено — эвристика не сработала');
+  }
+  if (!repairEvents.includes('criteria_repaired')) {
+    throw new Error('criteria-defect (чиним): событие criteria_repaired не найдено — критерий не был пересобран');
+  }
+  console.log('[mock] criteria-defect (чиним) OK — сломанный критерий (задвоенный regex) обнаружен и пересобран архитектором, дерево дошло до done.');
+
+  const confirmed = getTask(idConfirm);
+  console.log(`[mock] criteria-defect (подтверждаем): status=${confirmed.status} attempts=${confirmed.attempts}`);
+  if (confirmed.status !== 'blocked_needs_human') {
+    throw new Error(`criteria-defect (подтверждаем): ожидали blocked_needs_human (критерий подтверждён верным), получили ${confirmed.status}`);
+  }
+  const confirmEvents = eventNames(idConfirm);
+  if (!confirmEvents.includes('criteria_defect_suspected')) {
+    throw new Error('criteria-defect (подтверждаем): событие criteria_defect_suspected не найдено — эвристика не сработала');
+  }
+  if (!confirmEvents.includes('criteria_defect_confirmed')) {
+    throw new Error('criteria-defect (подтверждаем): событие criteria_defect_confirmed не найдено — архитектор не подтвердил критерий');
+  }
+  if (confirmEvents.includes('criteria_repaired')) {
+    throw new Error('criteria-defect (подтверждаем): критерий НЕ должен был чиниться — это ложное срабатывание репарации на рабочем критерии');
+  }
+  console.log('[mock] criteria-defect (подтверждаем) OK — эвристика заподозрила брак, архитектор подтвердил критерий верным, блок остался (доверие построено на недоверии).');
+}
+
 // --- Сценарий Е (§26.6, П§4): Кузница инструментов — сборка (поймал→починил) →
 // --- регистрация → tool_run → продукт читает результат; version-bump ------
 async function runForgeScenario() {
@@ -858,15 +976,22 @@ async function runParallelScenario() {
   const { tscGate } = await import('./merge.js');
   const fsMod = await import('node:fs');
   const pathMod = await import('node:path');
+  const osMod = await import('node:os');
 
   if (fsMod.existsSync(WORKSPACE)) fsMod.rmSync(WORKSPACE, { recursive: true, force: true });
   if (fsMod.existsSync(WORKTREES_DIR)) fsMod.rmSync(WORKTREES_DIR, { recursive: true, force: true });
   fsMod.mkdirSync(WORKSPACE, { recursive: true });
 
-  // --- tsc-ворота: юнит-проверка трёх веток БЕЗ реального typescript/сети ---
-  // (typescript — optionalDependency, недоступен в этой среде; npx без
-  // предустановленного пакета качает его из сети — недопустимо в MOCK, §24).
-  const scratch = pathMod.join(WORKTREES_DIR, '..', '.tsc-gate-scratch');
+  // --- tsc-ворота: юнит-проверка трёх веток, БЕЗ сети (npx без предустановленного
+  // пакета качает его из сети — недопустимо в MOCK, §24). typescript — optionalDependency:
+  // может быть установлен или нет на конкретной машине — ветку "недоступен локально"
+  // проверяем НЕ полагаясь на реальное отсутствие пакета в ROOT/node_modules (раньше
+  // scratch лежал внутри ROOT на той же глубине, что и настоящий worktree, поэтому
+  // resolveTscBin() случайно находил РЕАЛЬНЫЙ ROOT/node_modules/.bin/tsc, стоило
+  // typescript оказаться установленным — реальный баг, вскрытый этим же прогоном).
+  // scratch — вне дерева ROOT (os.tmpdir()), так что fallback-кандидат
+  // `worktreePath/../../node_modules/.bin` физически не может попасть на ROOT.
+  const scratch = pathMod.join(osMod.tmpdir(), `loom-tsc-gate-scratch-${process.pid}`);
   fsMod.rmSync(scratch, { recursive: true, force: true });
 
   const noConfigDir = pathMod.join(scratch, 'no-config');
@@ -898,7 +1023,7 @@ async function runParallelScenario() {
   const gateBad = tscGate(badDir);
   if (gateBad.ok) throw new Error('tsc-gate: с подсунутым битым bad.d.ts (через тестовый двойник tsc) ворота обязаны быть ok=false');
   fsMod.rmSync(scratch, { recursive: true, force: true });
-  console.log('[mock] tsc-gate юнит-проверки OK: без tsconfig → не применимо; typescript недоступен → graceful skip (без сети); битый d.ts → gate=false.');
+  console.log('[mock] tsc-gate юнит-проверки OK: без tsconfig → не применимо; tsc недостижим из scratch → graceful skip (без сети); битый d.ts → gate=false.');
 
   // --- 8 задач / 2 воркера: 6 «чистых» + 2 с искусственным конфликтом на shared.js ---
   const runId = newRunId();
@@ -1391,6 +1516,7 @@ async function main() {
     ['tweak: router пишет критерий сам (Фаза 3)', runTweakScenario],
     ['question: read-only аналитик, без задач (Фаза 3)', runQuestionScenario],
     ['path-lock: запись вне workspace блокируется и логируется (Фаза 4)', runPathLockScenario],
+    ['подозрение на брак критерия: чиним сломанный / подтверждаем верный (scar 34, П§11)', runCriteriaDefectScenario],
     ['дашборд: node:http смоук — список/детали/чат, ноль записи в доску (§22, П§7.2)', runDashboardSmokeScenario],
     ['maintenance-минимум: regression_detected как tweak + AUTO_MERGES_PER_DAY (§18, П§7.3)', runMaintenanceScenario],
     ['Telegram-вход (опционально): parseUpdate + handleIncoming с подставным fetch (П§7)', runTelegramScenario],

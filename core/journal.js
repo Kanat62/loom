@@ -111,6 +111,11 @@ function jsonOrNull(v) {
   return typeof v === 'string' ? v : JSON.stringify(v);
 }
 
+// Единственное число дефолтного бюджета задачи — переиспользуется addTask()
+// (t.budget_usd ?? DEFAULT_TASK_BUDGET_USD) и repairCriteria() (продление
+// бюджета на один стандартный «круг», scar 34), чтобы не разъезжаться.
+const DEFAULT_TASK_BUDGET_USD = 2.0;
+
 export function newId(prefix = 't') {
   return `${prefix}_${crypto.randomUUID()}`;
 }
@@ -145,7 +150,7 @@ export function addTask(t) {
     jsonOrNull(t.touches_files) || '[]',
     jsonOrNull(t.touches_functions) || '[]',
     t.blocked_by_task_id || null,
-    t.budget_usd ?? 2.0,
+    t.budget_usd ?? DEFAULT_TASK_BUDGET_USD,
     0.0,
     null,
     0,
@@ -287,12 +292,47 @@ export function isOverBudget(id) {
   return t.spent_usd >= t.budget_usd;
 }
 
-/** releaseStuck() — убитый процесс оставляет claimed-задачи; возвращаем в pending (шрам 25). */
+/**
+ * releaseStuck() — убитый процесс оставляет claimed-задачи; возвращаем в
+ * pending (шрам 25). 'suspected_criteria_defect' (scar 34) — тот же класс
+ * «процесс мог умереть посреди этого шага»: review-звонок к архитектору
+ * идёт синхронно внутри handleAttemptFailure, статус в БД виден только на
+ * время этого звонка — но если процесс умрёт именно тогда, задача не должна
+ * зависнуть навечно в промежуточном статусе, как claimed.
+ */
 export function releaseStuck() {
   const res = db().prepare(`
-    UPDATE tasks SET status='pending', claimed_by=NULL WHERE status='claimed'
+    UPDATE tasks SET status='pending', claimed_by=NULL
+    WHERE status IN ('claimed', 'suspected_criteria_defect')
   `).run();
   return res.changes;
+}
+
+/**
+ * repairCriteria(id, criteria) — узкий контракт (НЕ общего назначения
+ * «отредактировать задачу как угодно»): заменяет criteria и возвращает
+ * задачу к чистой попытке (attempts=0, feedback/question очищены,
+ * claimed_by снят). Единственный вызывающий — coordinator.js, ПОСЛЕ
+ * подтверждённого архитектором брака критерия (scar 34, П§11): критерии
+ * пишет архитектор (§8), поэтому только его ревью имеет право их менять —
+ * не coordinator сам по себе. spent_usd НЕ обнуляется (деньги реально
+ * потрачены, история расхода — правда, стирать её значило бы врать самим
+ * себе о стоимости прогона). Если задача уже исчерпала бюджет, борясь со
+ * сломанным критерием, а не с настоящей сложностью, — budget_usd продлевается
+ * на один стандартный «круг» СВЕРХ уже потраченного, иначе починенный
+ * критерий немедленно упрётся в isOverBudget() на первой же следующей
+ * попытке, так и не получив шанса пройти.
+ */
+export function repairCriteria(id, criteria) {
+  const t = getTask(id);
+  if (!t) return null;
+  const budget = t.spent_usd >= t.budget_usd ? t.spent_usd + DEFAULT_TASK_BUDGET_USD : t.budget_usd;
+  db().prepare(`
+    UPDATE tasks SET criteria = ?, status = 'pending', attempts = 0,
+      feedback = NULL, question = NULL, claimed_by = NULL, budget_usd = ?
+    WHERE id = ?
+  `).run(jsonOrNull(criteria), budget, id);
+  return getTask(id);
 }
 
 export function getTask(id) {

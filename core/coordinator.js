@@ -10,11 +10,12 @@ import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import {
   claimNext, setStatus, addSpent, isOverBudget, releaseStuck, newRunId,
-  logEvent, listEvents, listTasks, getTask, incrementAttempts,
+  logEvent, listEvents, listTasks, getTask, incrementAttempts, repairCriteria,
 } from './journal.js';
 import { runCoder, clearEyesState } from '../agents/coder.js';
 import { runTester } from '../agents/tester.js';
 import { runSkillWriter } from '../agents/skill.js';
+import { reviewCriterion } from '../agents/architect.js';
 import { isDockerAvailable, buildWorkspaceImage } from './docker.js';
 import { WORKSPACE, TOOLS_DIR, WORKTREES_DIR, MAX_ATTEMPTS, ROOT } from './config.js';
 import { progress } from './io.js';
@@ -194,9 +195,103 @@ function remainingCount(role) {
   return listTasks({ status: 'pending', role }).length;
 }
 
-function handleAttemptFailure(task, runId, report, role) {
+// Числа в отчёте тестера (координаты, счёт, тайминги) легитимно скачут
+// между попытками даже при ОДНОЙ И ТОЙ ЖЕ причине провала — нормализация
+// нужна, чтобы сравнивать ФОРМУ провала, а не точные значения (scar 34).
+function normalizeReport(report) {
+  return String(report || '').replace(/\d+/g, '#');
+}
+
+/**
+ * Tree-хэши коммитов автокоммита кодера ("loom: coder attempt N on
+ * <taskId> ...", autoCommit() выше) по попыткам, в хронологическом порядке.
+ * Различие tree-хэшей между попытками — единственный дешёвый и честный
+ * способ убедиться, что кодер РЕАЛЬНО писал разный код, а не буквально
+ * прислал то же самое: без этого «критерий провалился одинаково N раз»
+ * нельзя отличить от «кодер сдался и повторил старый ответ» (scar 34).
+ */
+function attemptTreeHashes(codeRoot, taskId) {
+  try {
+    const log = execFileSync('git', ['log', '--format=%H %s'], { cwd: codeRoot, stdio: 'pipe' }).toString();
+    const marker = ` on ${taskId} `;
+    const hashes = [];
+    for (const line of log.split('\n')) {
+      const sp = line.indexOf(' ');
+      if (sp === -1) continue;
+      if (line.slice(sp).includes(marker)) hashes.push(line.slice(0, sp));
+    }
+    hashes.reverse(); // git log — новые сверху, нужен хронологический порядок попыток
+    return hashes.map((h) => execFileSync('git', ['rev-parse', `${h}^{tree}`], { cwd: codeRoot, stdio: 'pipe' }).toString().trim());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Подозрение «брак критерия, не кодера» (scar 34, П§11): критерий проваливается
+ * с ОДИНАКОВОЙ (после нормализации чисел) причиной на КАЖДОЙ попытке, при
+ * этом код реально менялся между попытками (git tree-хэш). Рабочий, но
+ * честно проваливающийся код обычно даёт РАЗНЫЕ провалы между попытками
+ * (другие числа, другое условие) — если форма провала не меняется вообще,
+ * а код меняется, вероятнее сломан сам тест, не решение.
+ * НЕ применяется к regression (повтор ЧУЖИХ критериев, не своего) и
+ * tool_run (кодер вообще не вызывается — не с чем сравнивать «код менялся»).
+ * Один review на задачу максимум — если событие уже есть, не повторяем.
+ */
+function detectCriteriaDefect(task, codeRoot) {
+  if (task.type === 'regression' || task.type === 'tool_run') return null;
+  if (listEvents({ task_id: task.id, type: 'criteria_defect_suspected' }).length) return null;
+
+  const testEvents = listEvents({ task_id: task.id, type: 'test_result' });
+  if (testEvents.length < 2) return null;
+
+  const reports = testEvents.map((e) => {
+    try { return JSON.parse(e.payload)?.report || ''; } catch { return ''; }
+  });
+  if (new Set(reports.map(normalizeReport)).size !== 1) return null;
+
+  const hashes = new Set(attemptTreeHashes(codeRoot, task.id));
+  if (hashes.size < 2) return null;
+
+  return { reports };
+}
+
+async function handleAttemptFailure(task, runId, report, role, codeRoot) {
   const fresh = getTask(task.id);
   if (fresh.attempts >= MAX_ATTEMPTS) {
+    const defect = detectCriteriaDefect(fresh, codeRoot);
+    if (defect) {
+      setStatus(task.id, 'suspected_criteria_defect', { feedback: report });
+      logEvent({
+        run_id: runId, task_id: task.id, type: 'status', agent: 'coordinator',
+        payload: { event: 'criteria_defect_suspected', attempts: fresh.attempts },
+      });
+      progress(`[coordinator] "${fresh.title}" — ${fresh.attempts} провала подряд с одинаковой причиной при разном коде: подозрение на брак критерия, зову архитектора на ревью`);
+
+      let criteria;
+      try { criteria = JSON.parse(fresh.criteria || '{}'); } catch { criteria = {}; }
+      // eslint-disable-next-line no-await-in-loop
+      const review = await reviewCriterion({
+        title: fresh.title, spec: fresh.spec, cmd: criteria.cmd, expect: criteria.expect, attemptReports: defect.reports, runId,
+      });
+
+      if (review.verdict === 'criterion_defect') {
+        repairCriteria(task.id, { cmd: review.cmd, expect: criteria.expect });
+        logEvent({
+          run_id: runId, task_id: task.id, type: 'status', agent: 'coordinator',
+          payload: { event: 'criteria_repaired', reason: review.reason },
+        });
+        progress(`[coordinator] критерий "${fresh.title}" пересобран архитектором (${review.reason}) — задача снова pending`);
+        return { task: getTask(task.id), verdict: 'retry', reason: 'criteria_repaired' };
+      }
+
+      logEvent({
+        run_id: runId, task_id: task.id, type: 'status', agent: 'coordinator',
+        payload: { event: 'criteria_defect_confirmed', reason: review.reason },
+      });
+      progress(`[coordinator] архитектор подтвердил критерий верным (${review.reason}) — блок остаётся`);
+    }
+
     setStatus(task.id, 'blocked_needs_human', { feedback: report });
     logEvent({
       run_id: runId, task_id: task.id, type: 'status', agent: 'coordinator',
@@ -284,7 +379,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
     let toolCall;
     try { toolCall = JSON.parse(task2.spec || '{}'); } catch { toolCall = {}; }
     if (typeof toolCall.tool !== 'string' || !toolCall.tool.trim()) {
-      return handleAttemptFailure(task, runId, 'FAIL: tool_run.spec обязан быть JSON {"tool":"name","args":[...]}, поле tool отсутствует', role);
+      return handleAttemptFailure(task, runId, 'FAIL: tool_run.spec обязан быть JSON {"tool":"name","args":[...]}, поле tool отсутствует', role, effectiveRoot);
     }
     // eslint-disable-next-line no-await-in-loop
     const runResult = await runTool(toolCall.tool, Array.isArray(toolCall.args) ? toolCall.args : [], {
@@ -316,7 +411,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
           payload: { event: 'path_lock_blocked', error: coderResult.error },
         });
       }
-      return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`, role);
+      return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`, role, effectiveRoot);
     }
     // Печать рядом с уже существующим usage-событием кодера (logEvent внутри
     // chat(), вызванного runCoder чуть выше).
@@ -350,7 +445,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
       // доверие построено на недоверии, не на слове тестера).
       const manifest = readToolManifest(effectiveRoot);
       if (!manifest) {
-        return handleAttemptFailure(task, runId, `${report}\nFAIL: критерий прошёл, но tool.json отсутствует или битый (обязателен §26.1) — инструмент НЕ зарегистрирован`.slice(0, 1000), role);
+        return handleAttemptFailure(task, runId, `${report}\nFAIL: критерий прошёл, но tool.json отсутствует или битый (обязателен §26.1) — инструмент НЕ зарегистрирован`.slice(0, 1000), role, effectiveRoot);
       }
       const registered = registerTool({
         name: manifest.name,
@@ -380,7 +475,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
     return { task: getTask(task.id), verdict: finalStatus };
   }
 
-  return handleAttemptFailure(task, runId, report, role);
+  return handleAttemptFailure(task, runId, report, role, effectiveRoot);
 }
 
 /** skill_writer — механически после done (§4); сбой этой роли не должен ронять координатор. */

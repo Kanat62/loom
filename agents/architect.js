@@ -109,6 +109,60 @@ async function regenerateCriteria({ title, spec, oldCriteria, runId }) {
 }
 
 /**
+ * reviewCriterion({title, spec, cmd, expect, attemptReports, runId}) →
+ * {verdict:'criterion_defect', cmd, reason} | {verdict:'confirmed_block', reason}
+ *
+ * scar 34 (П§11): вызывается coordinator.js, когда критерий проваливается
+ * с ОДИНАКОВОЙ (после нормализации чисел) причиной на КАЖДОЙ из MAX_ATTEMPTS
+ * попыток, при этом кодер каждый раз реально писал разный код (подтверждено
+ * git-историей, не догадкой) — сильный сигнал, что дело не в коде. Критерии
+ * пишет архитектор (§8: «нарушение любого правила = брак архитектора»),
+ * поэтому только он имеет право их чинить — не coordinator сам по себе, и не
+ * кодер (журнал, куда его инструментам хода нет, §8 преамбула).
+ *
+ * Симметрична regenerateCriteria() выше (тот же приём: отдельный userText
+ * поверх ОБЩЕГО architect.md, роль/тир не меняются), но для
+ * ПРОТИВОПОЛОЖНОГО брака: там критерий ВСЕГДА проходит (фиктивен, §8.8),
+ * здесь — критерий НИКОГДА не может пройти (сломан сам, не то, что проверяет).
+ *
+ * Дисбаланс осторожности сознательный: при любой неопределённости или сбое
+ * шлюза — 'confirmed_block' (задача остаётся blocked_needs_human человеку).
+ * Ложное «исправление» рабочего критерия хуже, чем оставить блок — доверие
+ * построено на недоверии (§26.0), это применимо и к самому этому механизму.
+ */
+export async function reviewCriterion({
+  title, spec, cmd, expect, attemptReports, runId,
+}) {
+  const userText = [
+    `Критерий задачи "${title}" провалился ${attemptReports.length} раз(а) подряд С ПОЧТИ ОДИНАКОВЫМ выводом теста, хотя кодер каждый раз писал РАЗНЫЙ код (подтверждено git-историей коммитов, не догадкой). Это сигнал, что дело может быть не в коде, а в самом критерии — но может быть и настоящий тяжёлый баг, который просто ловится одним и тем же условием каждый раз.`,
+    `Задача (spec): ${spec}`,
+    `Проверяемый критерий (cmd), ИМЕННО ЕГО текст нужно проверить на ошибку: ${cmd}`,
+    expect ? `Ожидаемая подстрока (expect): ${expect}` : '',
+    `Отчёты тестера по попыткам (для контекста, не редактируй их):\n${attemptReports.map((r, i) => `Попытка ${i + 1}: ${String(r).slice(0, 300)}`).join('\n')}`,
+    'Внимательно прочитай ТЕКСТ критерия на предмет реальной ошибки логики/экранирования/опечатки в САМОЙ ПРОВЕРКЕ — типичные примеры: задвоенное экранирование regex (в исходнике `/\\\\d/` вместо `/\\d/` — совпадает с буквальным `\\d`, а не с цифрой), обращение к несуществующему полю/селектору, перепутанный оператор сравнения, условие, которое математически не может стать true.',
+    'Если находишь конкретную, объяснимую ошибку В САМОМ ТЕКСТЕ критерия (не гадая по отчётам) — ответь JSON {"verdict":"criterion_defect","cmd":"исправленный критерий ЦЕЛИКОМ, той же структуры и с той же целью проверки, минимальная точечная правка","reason":"что именно было не так, коротко"}.',
+    'Если критерий выглядит логически верным (значит проблема настоящая, в коде/сложности задачи) — ответь JSON {"verdict":"confirmed_block","reason":"почему критерий верный"}.',
+    'Если сомневаешься — выбирай confirmed_block: ложное "исправление" рабочего критерия хуже, чем оставить задачу человеку.',
+    'Отвечай СТРОГО JSON, без markdown-фенсов.',
+  ].filter(Boolean).join('\n\n');
+
+  try {
+    const result = await callAgent({
+      role: 'architect', promptFile: 'architect.md', userText, json: true, runId, agent: 'architect_criteria_review',
+    });
+    if (
+      result && result.verdict === 'criterion_defect'
+      && typeof result.cmd === 'string' && result.cmd.trim() && result.cmd.trim() !== String(cmd).trim()
+    ) {
+      return { verdict: 'criterion_defect', cmd: result.cmd.trim(), reason: String(result.reason || '(без обоснования)').slice(0, 500) };
+    }
+    return { verdict: 'confirmed_block', reason: String(result?.reason || '(нет обоснования от архитектора)').slice(0, 500) };
+  } catch (e) {
+    return { verdict: 'confirmed_block', reason: `review call failed: ${e.message}` };
+  }
+}
+
+/**
  * runArchitect({brief, workspaceDir, workspaceListing, runId, projectId}) →
  * {ok, taskIds, regressionId, packages, installOk, precheckLog} | {ok:false, error}
  */
