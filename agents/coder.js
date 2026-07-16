@@ -126,7 +126,27 @@ export function buildEyesForAttempt(workspaceDir, taskId, attempt) {
   return `(дельта с прошлого хода — неизменённые файлы не показаны)\n\n${parts.join('\n\n')}`;
 }
 
-function buildUserPrompt(task, eyes) {
+// §27.2: дизайн-система доставляется ОТДЕЛЬНЫМ, всегда-полным блоком, а не
+// через обычные «глаза» — buildEyesForAttempt на попытках 3+ показывает
+// только дельту (added/changed/removed), и tokens.css/DESIGN.md, однажды
+// созданные дизайнером, между попытками кодера не меняются: они молча
+// выпали бы из контекста именно тогда, когда кодер их больше всего должен
+// видеть (повторная попытка после FAIL по дизайн-критерию). Гейт — по
+// факту наличия файла, не по domain: если tokens.css нет, блока просто нет.
+function buildDesignSystemBlock(workspaceDir) {
+  const tokensPath = path.join(workspaceDir, 'design', 'tokens.css');
+  if (!fs.existsSync(tokensPath)) return null;
+  const designMdPath = path.join(workspaceDir, 'DESIGN.md');
+  const tokensCss = fs.readFileSync(tokensPath, 'utf8');
+  const designMd = fs.existsSync(designMdPath) ? fs.readFileSync(designMdPath, 'utf8') : '';
+  return [
+    '## Дизайн-система проекта (обязательна к соблюдению, §27.2)',
+    `### design/tokens.css\n${tokensCss}`,
+    designMd ? `### DESIGN.md\n${designMd}` : '',
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildUserPrompt(task, eyes, designSystemBlock) {
   const parts = [
     `## Задача\n${task.title}\n\n${task.spec || ''}`,
     `## Критерий приёмки (справочно, правке не подлежит)\n${task.criteria || ''}`,
@@ -134,6 +154,7 @@ function buildUserPrompt(task, eyes) {
   if (task.feedback) {
     parts.push(`## Отчёт тестера (последняя попытка, почини именно это)\n${task.feedback}`);
   }
+  if (designSystemBlock) parts.push(designSystemBlock);
   parts.push(`## Текущие файлы workspace\n${eyes}`);
   return parts.join('\n\n');
 }
@@ -155,7 +176,8 @@ export function isPathInsideWorkspace(workspaceDir, relPath) {
  */
 export async function runCoder({ task, workspaceDir, runId }) {
   const eyes = buildEyesForAttempt(workspaceDir, task.id, task.attempts);
-  const userText = buildUserPrompt(task, eyes);
+  const designSystemBlock = buildDesignSystemBlock(workspaceDir);
+  const userText = buildUserPrompt(task, eyes, designSystemBlock);
   const messages = [
     { role: 'system', content: CODER_SYSTEM_PROMPT },
     { role: 'user', content: userText },

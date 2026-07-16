@@ -11,6 +11,7 @@ import {
 } from '../agents/advisor.js';
 import { routeRequest } from '../agents/router.js';
 import { runArchitect } from '../agents/architect.js';
+import { runDesigner } from '../agents/designer.js';
 import { listWorkspaceFileNames } from '../agents/coder.js';
 import { runLivein } from '../agents/livein.js';
 import { planResearch, evaluateResearch } from '../agents/researcher.js';
@@ -20,6 +21,7 @@ import {
   addTask, getTask, listTasks, releaseStuck, newRunId, setRootSpec, getRootSpec,
   listEvents, listEventsSince, mergeRootSpec,
 } from '../core/journal.js';
+import { resolveDomain } from '../core/domain.js';
 import { WORKSPACE, HISTORY_DIR, MOCK, GITHUB_PUSH } from '../core/config.js';
 import { ensureProductRepo, slugify } from '../core/github.js';
 
@@ -151,7 +153,13 @@ async function runProjectFlow(protocol, initialText, runId) {
 
   const brief = buildBrief({ protocol, initialText, step });
   const merged = mergeRootSpec(existingRootSpec, brief.summary, brief.engineering_defaults);
-  setRootSpec('default', merged.spec, merged.engineeringDefaults, protocol);
+  // §27.1: домен решается ОДИН раз на проект и дальше наследуется — если
+  // root_spec уже знает домен (проект не новый), новое решение/эвристика
+  // игнорируется, а не перебивает уже принятое (setRootSpec тоже страхует
+  // это через COALESCE, здесь — явно, чтобы не звать эвристику впустую).
+  const domain = existingRootSpec?.domain
+    || resolveDomain(brief.domain, `${merged.spec}\n${merged.engineeringDefaults.join('\n')}`);
+  setRootSpec('default', merged.spec, merged.engineeringDefaults, protocol, domain);
   backupWorkspaceHistory(protocol);
 
   // Архитектор получает ПОЛНУЮ (объединённую) картину продукта, не только
@@ -200,7 +208,7 @@ async function runProjectFlow(protocol, initialText, runId) {
   }
 
   await runBuildFlow({
-    protocol, brief, merged, fullBrief, runId, dataSummaryForReport,
+    protocol, brief, merged, fullBrief, runId, dataSummaryForReport, domain,
   });
 }
 
@@ -212,8 +220,29 @@ async function runProjectFlow(protocol, initialText, runId) {
  * дублировать его копипастой означало бы неизбежное расхождение при правках.
  */
 async function runBuildFlow({
-  protocol, brief, merged, fullBrief, runId, dataSummaryForReport,
+  protocol, brief, merged, fullBrief, runId, dataSummaryForReport, domain,
 }) {
+  // Дизайн-контур (§27.1/27.2): только domain='ui', ДО архитектора — план
+  // архитектора (§27.3, следующая стадия) должен видеть готовую систему.
+  // Провал здесь — честный останов, симметрично провалу npm install у
+  // архитектора ("нужен пакет → статус «нужен пакет»"): задачи ещё не
+  // созданы, продолжать строить UI без системы значило бы обесценить весь
+  // смысл этой роли.
+  if (domain === 'ui') {
+    console.log('\n[designer] издаю дизайн-систему проекта...');
+    const designerResult = await runDesigner({ brief: fullBrief, workspaceDir: WORKSPACE, runId });
+    if (!designerResult.ok) {
+      console.log(`\n[designer] не удалось издать дизайн-систему: ${designerResult.error}`);
+      printRunTokenSummary(runId);
+      return;
+    }
+    if (designerResult.skipped) {
+      console.log('[designer] система уже издана ранее в этом проекте — не переиздаю.');
+    } else {
+      console.log(`[designer] издана: ${designerResult.direction}`);
+    }
+  }
+
   const workspaceListing = listWorkspaceFileNames(WORKSPACE);
   const architectResult = await runArchitect({
     brief: fullBrief, workspaceDir: WORKSPACE, workspaceListing, runId, projectId: 'default',
@@ -373,7 +402,11 @@ async function runIngestFlow(folderPath) {
     answers.length ? `\nОтветы клиента на дыры/противоречия:\n${answers.join('\n')}` : '',
   ].join('\n');
   const merged = mergeRootSpec(existingRootSpec, summary, existingDefaults);
-  setRootSpec('default', merged.spec, merged.engineeringDefaults, 'spec');
+  // §27.1: /ingest не проходит через интервью советника (нет ready-JSON с
+  // полем domain) — домен решается ЦЕЛИКОМ эвристикой по тексту ТЗ-пакета,
+  // если проект ещё не решил его раньше.
+  const domain = existingRootSpec?.domain || resolveDomain(null, summary);
+  setRootSpec('default', merged.spec, merged.engineeringDefaults, 'spec', domain);
   backupWorkspaceHistory('spec');
 
   const brief = {
@@ -382,7 +415,7 @@ async function runIngestFlow(folderPath) {
   const fullBrief = { ...brief, requirements: result.requirements };
 
   await runBuildFlow({
-    protocol: 'spec', brief, merged, fullBrief, runId, dataSummaryForReport: null,
+    protocol: 'spec', brief, merged, fullBrief, runId, dataSummaryForReport: null, domain,
   });
 }
 

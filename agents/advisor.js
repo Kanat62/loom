@@ -118,6 +118,10 @@ async function runAdvisorStep({
       summary: typeof result.summary === 'string' ? result.summary : '',
       engineeringDefaults: Array.isArray(result.engineering_defaults) ? result.engineering_defaults : [],
       problem: protocol === 'problem' && result.problem && typeof result.problem === 'object' ? result.problem : null,
+      // §27.1: советник сам решает домен продукта; невалидное/отсутствующее
+      // значение — не ошибка здесь, harness (core/domain.js:resolveDomain)
+      // подстрахует эвристикой по тексту брифа.
+      domain: typeof result.domain === 'string' ? result.domain : null,
     };
   }
 
@@ -130,6 +134,7 @@ async function forceFinalize(protocol, history) {
     summary: renderHistory(history),
     engineeringDefaults: ['Интервью прервано предохранителем длины (MAX_INTERVIEW_TURNS) — решения приняты по имеющейся информации.'],
     problem: null,
+    domain: null,
     forced: true,
   };
 }
@@ -185,6 +190,7 @@ export function buildBrief({ protocol, initialText, step }) {
     summary: step.summary,
     engineering_defaults: step.engineeringDefaults,
     problem: step.problem,
+    domain: step.domain || null,
   };
 }
 

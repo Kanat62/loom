@@ -148,6 +148,15 @@ registerMockHandler('coder', ({ userMsg, idx }) => {
     return { files: { '../evil.js': "console.log('escaped workspace');\n" } };
   }
 
+  // §27.2 MOCK-покрытие 1: доказывает, что дизайн-блок реально доехал до
+  // РЕАЛЬНОГО agents/coder.js:buildUserPrompt (не переимплементация в моке)
+  // — матчим по всему userMsg (не только title), намеренно, это и есть
+  // предмет проверки этой ветки.
+  if (/ТЕСТ_ДИЗАЙН_ДОСТАВКА/.test(title)) {
+    const hasBlock = /## Дизайн-система проекта/.test(userMsg) && /tokens\.css/.test(userMsg);
+    return { files: { 'design-check.txt': hasBlock ? 'DESIGN_BLOCK_PRESENT' : 'DESIGN_BLOCK_MISSING' } };
+  }
+
   // scar 34 (П§11): критерий сломан (задвоенное экранирование regex, тот же
   // класс бага, что в реальном инциденте со змейкой) — правильный код НИКОГДА
   // не пройдёт эту проверку. Контент варьируется по idx (глобальный счётчик
@@ -359,6 +368,42 @@ registerMockHandler('advisor', ({ userMsg, opts }) => {
       'Один HTML-файл на клиенте, подключает calc.js через <script src>',
     ],
   };
+});
+
+// --- §27.2: designer --------------------------------------------------------
+// Валидные токены по умолчанию; маркеры в brief.request управляют веткой
+// "битых" токенов (тот же приём, что ТЕСТ_БРАК_КРИТЕРИЯ_*/ТЕСТ_КУЗНИЦА выше —
+// маркер в тексте, не глобальный счётчик, сценарий не зависит от порядка).
+const VALID_MOCK_TOKENS_CSS = [
+  ':root {',
+  '  --color-bg: #0f1115;',
+  '  --color-surface: #171a21;',
+  '  --color-text: #e6e8ec;',
+  '  --color-primary: #5b8def;',
+  '  --color-danger: #e5484d;',
+  '  --space-1: 4px;',
+  '  --space-2: 8px;',
+  '  --space-3: 16px;',
+  '  --space-4: 24px;',
+  '  --radius-1: 6px;',
+  '  --font-base: system-ui, sans-serif;',
+  '  --shadow-1: 0 1px 3px rgba(0,0,0,0.3);',
+  '}',
+].join('\n');
+const VALID_MOCK_DESIGN_MD = '## Сетка\nОдна колонка, макс. 960px.\n## Запрещено\nЦвет вне палитры токенов.\n';
+// Невалидно намеренно: селектор продукта вместо :root — ровно то, что
+// validateTokensCss обязан отклонить (§27.2 "никаких селекторов продукта").
+const BROKEN_MOCK_TOKENS_CSS = '.button { color: red; padding: 10px; }';
+
+registerMockHandler('designer', ({ userMsg }) => {
+  const isRetry = /Предыдущий ответ отклонён харнессом/.test(userMsg);
+  if (/ТЕСТ_ДИЗАЙН_БИТЫЕ_ЧИНИМ/.test(userMsg) && !isRetry) {
+    return { direction: 'мок: битые токены, первая попытка', tokens_css: BROKEN_MOCK_TOKENS_CSS, design_md: VALID_MOCK_DESIGN_MD };
+  }
+  if (/ТЕСТ_ДИЗАЙН_БИТЫЕ_ВСЕГДА/.test(userMsg)) {
+    return { direction: 'мок: битые токены, всегда', tokens_css: BROKEN_MOCK_TOKENS_CSS, design_md: VALID_MOCK_DESIGN_MD };
+  }
+  return { direction: 'мок: нейтральная система для дашборда', tokens_css: VALID_MOCK_TOKENS_CSS, design_md: VALID_MOCK_DESIGN_MD };
 });
 
 // --- Фаза 3: architect ------------------------------------------------------
@@ -1526,6 +1571,166 @@ async function runLiveinLaunchFailureScenario() {
   fsMod.rmSync(scratch, { recursive: true, force: true });
 }
 
+// --- Сценарий (§27.2/27.6 п.1): designer — валидные токены, доставка ------
+// кодеру ОТДЕЛЬНЫМ блоком, повторный вызов на том же проекте не переиздаёт
+// систему (ноль новых вызовов модели) --------------------------------------
+async function runDesignerScenario() {
+  const { runDesigner } = await import('../agents/designer.js');
+  const {
+    addTask, getTask, newRunId, listEvents,
+  } = await import('./journal.js');
+  const { runCoordinatorLoop } = await import('./coordinator.js');
+  const { WORKSPACE } = await import('./config.js');
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+
+  if (fsMod.existsSync(WORKSPACE)) fsMod.rmSync(WORKSPACE, { recursive: true, force: true });
+
+  const brief = {
+    protocol: 'wish',
+    request: 'Хочу дашборд с графиками продаж на веб-странице',
+    summary: 'Дашборд с графиками продаж',
+    engineering_defaults: ['Один HTML-файл, Chart.js через CDN'],
+  };
+  const runId = newRunId();
+
+  const first = await runDesigner({ brief, workspaceDir: WORKSPACE, runId });
+  if (!first.ok || first.skipped) {
+    throw new Error(`designer: первый вызов на проекте обязан издать систему (ok=true, skipped=false), получили ${JSON.stringify(first)}`);
+  }
+  if (!fsMod.existsSync(pathMod.join(WORKSPACE, 'design', 'tokens.css')) || !fsMod.existsSync(pathMod.join(WORKSPACE, 'DESIGN.md'))) {
+    throw new Error('designer: tokens.css и DESIGN.md обязаны появиться в workspace');
+  }
+  console.log(`[mock] designer: издана система — ${first.direction || '(без direction)'}`);
+
+  // Доставка кодеру (§27.2): проверяем РЕАЛЬНЫЙ agents/coder.js:buildUserPrompt
+  // (через настоящий runCoordinatorLoop→runCoder), не переимплементацию —
+  // MOCK-ветка coder только читает userMsg на предмет блока, ничего не решает.
+  const deliveryId = addTask({
+    title: 'ТЕСТ_ДИЗАЙН_ДОСТАВКА: страница показывает дизайн-систему',
+    spec: 'служебная проверка доставки дизайн-системы кодеру',
+    criteria: JSON.stringify({ cmd: 'node -e "console.log(\'PASS\')"' }),
+    role: 'coder',
+    type: 'project',
+  });
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+  const deliveryTask = getTask(deliveryId);
+  if (deliveryTask.status !== 'done') {
+    throw new Error(`designer delivery: служебная задача не дошла до done (status=${deliveryTask.status})`);
+  }
+  const checkContent = fsMod.readFileSync(pathMod.join(WORKSPACE, 'design-check.txt'), 'utf8').trim();
+  if (checkContent !== 'DESIGN_BLOCK_PRESENT') {
+    throw new Error(`designer delivery: дизайн-блок не попал в user-текст кодера (получили: ${checkContent})`);
+  }
+  console.log('[mock] designer: дизайн-блок реально доехал до кодера (проверено подстрокой в его user-тексте).');
+
+  // Повторный вызов на том же проекте (tokens.css уже есть) — НЕ переиздаёт
+  // систему и не тратит ни одного нового вызова модели.
+  const usageBefore = listEvents({ agent: 'designer', type: 'usage' }).length;
+  const second = await runDesigner({ brief, workspaceDir: WORKSPACE, runId });
+  const usageAfter = listEvents({ agent: 'designer', type: 'usage' }).length;
+  if (!second.ok || !second.skipped) {
+    throw new Error(`designer: повторный вызов на том же проекте обязан вернуть skipped=true, получили ${JSON.stringify(second)}`);
+  }
+  if (usageAfter !== usageBefore) {
+    throw new Error('designer: повторный вызов не должен тратить ни одного вызова модели (tokens.css уже существует)');
+  }
+  console.log('[mock] designer: повторный вызов на том же проекте не переиздаёт систему — ноль новых вызовов модели.');
+}
+
+// --- Сценарий (§27.2/27.6 п.2): валидация токенов харнессом ДО записи -----
+// (селектор вместо :root) → одна повторная попытка → чинится ИЛИ остаётся
+// невалидным навсегда (designer "тоже живёт по лестнице") -----------------
+async function runDesignerValidationScenario() {
+  const { runDesigner, validateTokensCss } = await import('../agents/designer.js');
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+  const osMod = await import('node:os');
+
+  const scratch = pathMod.join(osMod.tmpdir(), `loom-designer-scratch-${process.pid}`);
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+  fsMod.mkdirSync(scratch, { recursive: true });
+
+  const briefFix = {
+    protocol: 'wish', request: 'ТЕСТ_ДИЗАЙН_БИТЫЕ_ЧИНИМ: дашборд с графиками', summary: 'дашборд', engineering_defaults: [],
+  };
+  const fixResult = await runDesigner({ brief: briefFix, workspaceDir: scratch, runId: 'r-designer-fix' });
+  if (!fixResult.ok || fixResult.skipped) {
+    throw new Error(`designer validation: первый ответ битый (селектор вместо :root), повторная попытка обязана починить и записать (получили ${JSON.stringify(fixResult)})`);
+  }
+  const written = fsMod.readFileSync(pathMod.join(scratch, 'design', 'tokens.css'), 'utf8');
+  if (!validateTokensCss(written).ok) {
+    throw new Error('designer validation: записанные на диск токены после починки обязаны сами проходить validateTokensCss');
+  }
+  console.log('[mock] designer validation (чиним): битые токены на первой попытке — харнесс поймал ДО записи, вторая попытка починена и записана.');
+
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+  fsMod.mkdirSync(scratch, { recursive: true });
+
+  const briefAlways = {
+    protocol: 'wish', request: 'ТЕСТ_ДИЗАЙН_БИТЫЕ_ВСЕГДА: дашборд', summary: 'дашборд', engineering_defaults: [],
+  };
+  const alwaysResult = await runDesigner({ brief: briefAlways, workspaceDir: scratch, runId: 'r-designer-always' });
+  if (alwaysResult.ok) {
+    throw new Error(`designer validation: токены битые ОБЕ попытки обязаны провалить runDesigner (ok:false), получили ${JSON.stringify(alwaysResult)}`);
+  }
+  if (fsMod.existsSync(pathMod.join(scratch, 'design', 'tokens.css'))) {
+    throw new Error('designer validation: невалидные токены НЕ должны попасть на диск ни при каких обстоятельствах');
+  }
+  console.log(`[mock] designer validation (навсегда битые): ${alwaysResult.error} — ничего не записано, дизайнер тоже живёт по лестнице.`);
+
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+}
+
+// --- Сценарий (§27.1/27.6 п.5): доменный тег — явный домен побеждает -------
+// эвристику, UI-сигналы ловятся без объявленного домена, non-ui не тратит
+// ни одного designer-вызова (инвариант стоимости) --------------------------
+async function runDomainGateScenario() {
+  const { resolveDomain } = await import('../core/domain.js');
+  const { runDesigner } = await import('../agents/designer.js');
+  const { newRunId, listEvents } = await import('./journal.js');
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+  const osMod = await import('node:os');
+
+  if (resolveDomain('data', 'сайт со страницами и canvas') !== 'data') {
+    throw new Error('resolveDomain: явно заявленный домен обязан побеждать эвристику по тексту');
+  }
+  if (resolveDomain(undefined, 'простой сайт-визитка с несколькими страницами') !== 'ui') {
+    throw new Error('resolveDomain: эвристика обязана поймать UI-сигнал ("страниц") и вернуть ui');
+  }
+  const cliDomain = resolveDomain(undefined, 'консольная утилита конвертирует CSV в JSON, работает пакетно из терминала');
+  if (cliDomain !== 'cli') {
+    throw new Error(`resolveDomain: без UI-сигналов домен обязан быть безопасным дефолтом (не ui), получили "${cliDomain}"`);
+  }
+
+  // Буквально та же ветка, что в bin/talk.js:runBuildFlow — domain!=='ui' →
+  // designer не вызывается вовсе, ноль потраченных вызовов модели.
+  const scratch = pathMod.join(osMod.tmpdir(), `loom-domain-gate-scratch-${process.pid}`);
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+  fsMod.mkdirSync(scratch, { recursive: true });
+  const runId = newRunId();
+  const before = listEvents({ run_id: runId, agent: 'designer' }).length;
+
+  if (cliDomain === 'ui') {
+    await runDesigner({
+      brief: {
+        protocol: 'wish', request: 'x', summary: 'x', engineering_defaults: [],
+      },
+      workspaceDir: scratch,
+      runId,
+    });
+  }
+
+  const after = listEvents({ run_id: runId, agent: 'designer' }).length;
+  if (after !== before || fsMod.existsSync(pathMod.join(scratch, 'design', 'tokens.css'))) {
+    throw new Error('domain-gate: designer не должен вызываться и писать файлы для domain!=="ui" (инвариант стоимости §27.1)');
+  }
+  console.log('[mock] domain-gate OK — явный домен побеждает эвристику, UI-сигналы ловятся без объявленного домена, non-ui не тратит ни одного designer-вызова.');
+
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -1572,6 +1777,9 @@ async function main() {
     ['Telegram-вход (опционально): parseUpdate + handleIncoming с подставным fetch (П§7)', runTelegramScenario],
     ['advisor не переспрашивает уже решённое (buildUserText + mergeRootSpec, закрывает долг части 1, П§9)', runContextInheritanceRegressionScenario],
     ['live_in: падение browserType.launch() откатывается на статику, не роняет прогон (Г§13(1))', runLiveinLaunchFailureScenario],
+    ['designer: валидные токены, доставка кодеру, повторный вызов не переиздаёт (§27.2)', runDesignerScenario],
+    ['designer: валидация токенов харнессом до записи — чинится/остаётся битым (§27.2)', runDesignerValidationScenario],
+    ['доменный тег: явный домен побеждает эвристику, non-ui не тратит designer (§27.1)', runDomainGateScenario],
   ];
 
   let failed = false;

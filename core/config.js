@@ -23,6 +23,10 @@ export const ROLES = {
   researcher: ['claude-cli:sonnet', 'claude-cli:opus'],
   skill:      ['claude-cli:haiku'],
   cheap:      ['claude-cli:haiku'],
+  // designer (§27.2): сознательно БЕЗ лестницы фолбэков — один вызов на
+  // проект, его выход входит в контекст ВСЕХ последующих UI-задач,
+  // экономить здесь — ложная экономия.
+  designer:   ['claude-cli:opus'],
 };
 
 // THINKING per-role: reasoning выключен для лёгких быстрых ролей (шрам 14).
@@ -35,6 +39,7 @@ export const THINKING = {
   coder: true,
   live_in: true,
   researcher: true,
+  designer: true,
 };
 
 // Условные цены (USD за 1M токенов) — claude-cli подписка не биллит по токену,

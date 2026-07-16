@@ -68,6 +68,7 @@ function migrate(d) {
       spec TEXT,
       engineering_defaults TEXT,
       route TEXT,
+      domain TEXT,
       created_at INTEGER
     );
 
@@ -104,6 +105,10 @@ function migrate(d) {
   // tasks.covers — П§6.2 (§11): трассировка требование→задача для ingest
   // ТЗ-пакета. JSON-массив req id ('файл.md:R1'), '[]' для задач вне ingest.
   ensureColumn(d, 'tasks', 'covers', "covers TEXT DEFAULT '[]'");
+  // root_spec.domain — §27.1: "ui"|"cli"|"lib"|"data", решается один раз на
+  // проект и наследуется всеми задачами (см. setRootSpec — COALESCE не даёт
+  // последующим вызовам без домена стереть уже принятое решение).
+  ensureColumn(d, 'root_spec', 'domain', 'domain TEXT');
 }
 
 function jsonOrNull(v) {
@@ -383,12 +388,24 @@ export function listEventsSince(ts) {
   return db().prepare(`SELECT * FROM events WHERE created_at >= ? ORDER BY id ASC`).all(ts);
 }
 
-export function setRootSpec(projectId, spec, engineeringDefaults, route) {
+/**
+ * setRootSpec(projectId, spec, engineeringDefaults, route, domain) — domain
+ * (§27.1) необязателен и, если не передан (или пуст), НЕ стирает уже
+ * принятое решение: COALESCE(excluded.domain, root_spec.domain) сохраняет
+ * старое значение, когда новый вызов ничего не знает о домене (bin/telegram.js,
+ * evals/bank.js и большинство MOCK-сценариев его не передают вовсе — только
+ * bin/talk.js/bin/ingest.js решают домен один раз и пишут его явно).
+ */
+export function setRootSpec(projectId, spec, engineeringDefaults, route, domain) {
   db().prepare(`
-    INSERT INTO root_spec (project_id, spec, engineering_defaults, route, created_at)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(project_id) DO UPDATE SET spec=excluded.spec, engineering_defaults=excluded.engineering_defaults, route=excluded.route
-  `).run(projectId, spec, jsonOrNull(engineeringDefaults), route || null, Date.now());
+    INSERT INTO root_spec (project_id, spec, engineering_defaults, route, domain, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(project_id) DO UPDATE SET
+      spec=excluded.spec,
+      engineering_defaults=excluded.engineering_defaults,
+      route=excluded.route,
+      domain=COALESCE(excluded.domain, root_spec.domain)
+  `).run(projectId, spec, jsonOrNull(engineeringDefaults), route || null, domain || null, Date.now());
 }
 
 export function getRootSpec(projectId = 'default') {
