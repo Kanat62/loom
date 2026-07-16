@@ -9,6 +9,6 @@
     "moduleResolution": "bundler",
     "strict": false
   },
-  "include": ["workspace/**/*.js", "*.js"],
-  "exclude": ["node_modules", "workspace/node_modules"]
+  "include": ["agents/**/*.js", "bin/**/*.js", "core/**/*.js", "tools/**/*.js", "*.js"],
+  "exclude": ["node_modules", "workspace", "workspace.mock", "tools.mock"]
 }
