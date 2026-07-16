@@ -1476,6 +1476,56 @@ async function runContextInheritanceRegressionScenario() {
   console.log('[mock] mergeRootSpec: второй заход дополняет engineering_defaults/summary первого, ничего не теряет — закрывает долг части 1.');
 }
 
+// --- Сценарий (Г§13(1), регрессия «чистая машина»): live_in — падение
+// browserType.launch() внутри Playwright тоже откатывается на статический
+// разбор, а не роняет прогон -------------------------------------------
+// На чистой машине пакет playwright ставится (optionalDependency), но
+// браузерные бинарники — отдельный шаг (`npx playwright install chromium`),
+// который никто не выполнял: import('playwright') удаётся, а launch()
+// бросает. Раньше inspectWithPlaywright() в этом случае возвращала
+// {ok:false, live:true, error} — истинное значение, поэтому `evidence ||
+// inspectStatic()` НЕ откатывалась, и весь live_in (а с ним npm run mock)
+// падал. Тот же урок, что и tsc-gate регрессия (DECISIONS выше): не
+// полагаемся на случайное состояние ЭТОЙ машины (здесь браузеры реально
+// стоят, см. project pipeline выше) — подсовываем заведомо падающий
+// загрузчик через сеемую точку inspectProduct(..., loadPlaywright).
+async function runLiveinLaunchFailureScenario() {
+  const { inspectProduct } = await import('../agents/livein.js');
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+  const osMod = await import('node:os');
+
+  const scratch = pathMod.join(osMod.tmpdir(), `loom-livein-launch-fail-${process.pid}`);
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+  fsMod.mkdirSync(scratch, { recursive: true });
+  fsMod.writeFileSync(
+    pathMod.join(scratch, 'index.html'),
+    '<!doctype html><html><head><title>Т</title></head><body><button>Иди</button></body></html>',
+  );
+
+  const failingLoader = async () => ({
+    chromium: {
+      launch: async () => {
+        throw new Error("browserType.launch: Executable doesn't exist at .../chromium_headless_shell");
+      },
+    },
+  });
+
+  const evidence = await inspectProduct(scratch, 'index.html', failingLoader);
+  if (!evidence.ok) {
+    throw new Error(`live_in launch-failure fallback: ожидали ok=true (деградация на статику), получили error=${evidence.error}`);
+  }
+  if (evidence.live !== false) {
+    throw new Error('live_in launch-failure fallback: ожидали live=false (статический разбор, не живой рендер)');
+  }
+  if (!/playwright install chromium/i.test(evidence.note || '')) {
+    throw new Error(`live_in launch-failure fallback: note обязан подсказывать "npx playwright install chromium", получили: ${evidence.note}`);
+  }
+  console.log('[mock] live_in launch-failure fallback OK — падение browserType.launch() не роняет прогон, честный live:false note с подсказкой про браузеры.');
+
+  fsMod.rmSync(scratch, { recursive: true, force: true });
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -1521,6 +1571,7 @@ async function main() {
     ['maintenance-минимум: regression_detected как tweak + AUTO_MERGES_PER_DAY (§18, П§7.3)', runMaintenanceScenario],
     ['Telegram-вход (опционально): parseUpdate + handleIncoming с подставным fetch (П§7)', runTelegramScenario],
     ['advisor не переспрашивает уже решённое (buildUserText + mergeRootSpec, закрывает долг части 1, П§9)', runContextInheritanceRegressionScenario],
+    ['live_in: падение browserType.launch() откатывается на статику, не роняет прогон (Г§13(1))', runLiveinLaunchFailureScenario],
   ];
 
   let failed = false;

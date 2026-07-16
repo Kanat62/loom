@@ -10,14 +10,23 @@ import { addTask } from '../core/journal.js';
 
 /**
  * Живой браузер через Playwright (§8.1: pathToFileURL, не склейка file://).
- * Playwright — опциональная зависимость: если не установлен (`npm install
- * playwright` не выполнялся), возвращает null, вызывающий откатывается на
- * статический разбор — деградация, а не смерть прогона.
+ * Playwright — опциональная зависимость, и её отсутствие — не единственный
+ * способ остаться без живого рендера: пакет ставится через
+ * `optionalDependencies`, но браузерные бинарники (`npx playwright install
+ * chromium`) — отдельный шаг, который на чистой машине никто не выполнял.
+ * Тогда `import('playwright')` УДАЁТСЯ, а `chromium.launch()` бросает —
+ * раньше это шло в `{ok:false, live:true, error}`, что для вызывающего
+ * (inspectProduct) неотличимо от «осмотр провалился», и весь live_in
+ * (а с ним npm run mock, Г§13(1)) падал вместо честной деградации.
+ * Теперь любая ошибка после успешного import (launch, newPage, goto,
+ * evaluate) тоже уходит на статический фолбэк — деградация, а не смерть
+ * прогона. loadPlaywright — сеемая точка для тестов (см. mock.js):
+ * позволяет подсунуть заведомо падающий загрузчик, не трогая node_modules.
  */
-async function inspectWithPlaywright(entryFile) {
+async function inspectWithPlaywright(entryFile, loadPlaywright = () => import('playwright')) {
   let playwright;
   try {
-    playwright = await import('playwright');
+    playwright = await loadPlaywright();
   } catch {
     return null;
   }
@@ -50,37 +59,46 @@ async function inspectWithPlaywright(entryFile) {
       consoleErrors: consoleErrors.slice(0, 10),
     };
   } catch (e) {
-    return { ok: false, live: true, error: e.message };
+    return { fallbackError: e.message };
   } finally {
     if (browser) await browser.close();
   }
 }
 
-/** Фолбэк без Playwright — честно помечен как менее надёжный (нет живого рендера). */
-function inspectStatic(entryFile) {
+/**
+ * Фолбэк без живого рендера — честно помечен как менее надёжный.
+ * failureReason непустой ⇔ пакет playwright был найден, но launch/инспекция
+ * упали (скорее всего браузерные бинарники не поставлены) — note в этом
+ * случае называет конкретную причину вместо общей «недоступен».
+ */
+function inspectStatic(entryFile, failureReason) {
   try {
     const html = fs.readFileSync(entryFile, 'utf8');
     const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
+    const note = failureReason
+      ? `Playwright установлен, но живой рендер не удался (${failureReason}) — статический разбор HTML вместо браузера на 375px. Поставить браузеры: npx playwright install chromium.`
+      : 'Playwright недоступен (не установлен) — статический разбор HTML, не живой рендер на 375px. Поставить: npx playwright install chromium.';
     return {
       ok: true,
       live: false,
       title: titleMatch ? titleMatch[1] : null,
       hasActionable: /<button|role=["']button["']|<a\s/i.test(html),
       length: html.length,
-      note: 'Playwright недоступен (не установлен) — статический разбор HTML, не живой рендер на 375px.',
+      note,
     };
   } catch (e) {
     return { ok: false, live: false, error: e.message };
   }
 }
 
-export async function inspectProduct(workspaceDir, entryFileName = 'index.html') {
+export async function inspectProduct(workspaceDir, entryFileName = 'index.html', loadPlaywright) {
   const entryFile = path.join(workspaceDir, entryFileName);
   if (!fs.existsSync(entryFile)) {
     return { ok: false, error: `входной файл продукта не найден: ${entryFileName}` };
   }
-  const live = await inspectWithPlaywright(entryFile);
-  return live || inspectStatic(entryFile);
+  const live = await inspectWithPlaywright(entryFile, loadPlaywright);
+  if (live?.ok) return live;
+  return inspectStatic(entryFile, live?.fallbackError);
 }
 
 function buildLiveinPrompt(rootSpec, evidence) {
