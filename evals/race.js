@@ -20,6 +20,10 @@ import { JOURNAL_DB_PATH } from '../core/config.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_COUNT = 4;
 const TASK_COUNT = 40;
+// §29.2 п.1: claimNext требует projectId — race.js резетит всю БД перед
+// прогоном (resetDb), так что фиксированный id безопасен (не реальный
+// проект, не нужна запись в таблице projects — FK на неё нет).
+const RACE_PROJECT_ID = 'race-eval';
 
 function resetDb() {
   for (const suffix of ['', '-wal', '-shm']) {
@@ -31,7 +35,9 @@ function resetDb() {
 async function runCrossProcessRace() {
   const ids = [];
   for (let i = 0; i < TASK_COUNT; i++) {
-    ids.push(addTask({ title: `race-${i}`, spec: 'race', criteria: '{}', role: 'coder' }));
+    ids.push(addTask({
+      project_id: RACE_PROJECT_ID, title: `race-${i}`, spec: 'race', criteria: '{}', role: 'coder',
+    }));
   }
 
   const workerPath = path.join(__dirname, 'race-worker.js');
@@ -57,7 +63,7 @@ async function runCrossProcessRace() {
 
 function runWorker(workerPath, idx) {
   return new Promise((resolve, reject) => {
-    const child = fork(workerPath, [String(idx)], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    const child = fork(workerPath, [String(idx), RACE_PROJECT_ID], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
     let out = [];
     child.on('message', (msg) => { out = msg; });
     child.on('exit', (code) => {
@@ -88,13 +94,13 @@ async function runWeaveRace() {
 
   for (let i = 0; i < TOTAL; i++) {
     addTask({
-      title: `weave-${i}`, spec: 'weave', criteria: '{}', role: 'coder',
+      project_id: RACE_PROJECT_ID, title: `weave-${i}`, spec: 'weave', criteria: '{}', role: 'coder',
       touches_files: [FILES[i % FILES.length]],
     });
   }
 
   function activeTouchesNow() {
-    const active = listTasks({ status: 'claimed', role: 'coder' });
+    const active = listTasks({ status: 'claimed', role: 'coder', project_id: RACE_PROJECT_ID });
     const set = new Set();
     for (const t of active) {
       let touches;
@@ -114,7 +120,7 @@ async function runWeaveRace() {
     // eslint-disable-next-line no-await-in-loop
     const roundResults = await Promise.all(Array.from({ length: WORKERS }, async (_, w) => {
       const activeTouches = activeTouchesNow();
-      return claimNext('coder', `weave-w${w}`, { activeTouches });
+      return claimNext('coder', `weave-w${w}`, { projectId: RACE_PROJECT_ID, activeTouches });
     }));
 
     for (let i = 0; i < roundResults.length; i++) {

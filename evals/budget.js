@@ -18,12 +18,14 @@ async function main() {
     if (fs.existsSync(p)) fs.rmSync(p);
   }
   if (fs.existsSync(WORKSPACE)) fs.rmSync(WORKSPACE, { recursive: true, force: true });
-  releaseStuck();
+  const projectId = 'budget-eval'; // §29.2 п.1: claimNext требует projectId; DB резетится выше, фиксированный id безопасен
+  releaseStuck({ projectId });
 
   // budget_usd == ровно одному мок-вызову: после первой попытки spent_usd
   // достигает лимита, вторая попытка должна быть остановлена ДО начала (§13:
   // «проверка ДО следующего вызова»).
   const id = addTask({
+    project_id: projectId,
     title: 'budget-stop probe',
     spec: 'Специально невыполнимая задача — важен не результат, а факт остановки по бюджету.',
     criteria: JSON.stringify({ cmd: 'node -e "process.exit(1)"' }), // всегда FAIL, чтобы не завершиться раньше по done
@@ -32,7 +34,9 @@ async function main() {
     budget_usd: MOCK_CALL_COST_USD, // 0.01 — «игрушечный лимит» из DoD
   });
 
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  await runCoordinatorLoop({
+    role: 'coder', workspaceDir: WORKSPACE, projectId,
+  });
 
   const task = getTask(id);
   console.log(`[budget] статус=${task.status} attempts=${task.attempts} spent_usd=${task.spent_usd} budget_usd=${task.budget_usd}`);

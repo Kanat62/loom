@@ -1,7 +1,13 @@
 // talk.js — сеанс (§25 ТЗ v4): пять типов входа за одним REPL. /status
-// /resume /exit, unhandledRejection-броня (шрам 25), .history-бэкап перед
-// изменениями (шрам 26, только tweak/project — question ничего не меняет),
-// санитизация ввода (шрам 32).
+// /resume /exit /projects /project, unhandledRejection-броня (шрам 25),
+// .history-бэкап перед изменениями (шрам 26, только tweak/project — question
+// ничего не меняет), санитизация ввода (шрам 32).
+//
+// §29 (шрам 35): проект — первоклассная сущность, активный проект живёт в
+// переменной сеанса (activeProject), не в тихом project_id='default'.
+// Правило рождения нового проекта — детерминированный код здесь, НЕ отдано
+// модели (§29.1: «маршрутизатор дал wish/problem/spec И (активного проекта
+// нет ИЛИ человек явно сказал «новый продукт»)»).
 import fs from 'node:fs';
 import path from 'node:path';
 import { question, closeInput, sanitizeLine } from '../core/io.js';
@@ -21,8 +27,11 @@ import {
   addTask, getTask, listTasks, releaseStuck, newRunId, setRootSpec, getRootSpec,
   listEvents, listEventsSince, mergeRootSpec,
 } from '../core/journal.js';
+import {
+  createProject, listProjects, touchProject,
+} from '../core/projects.js';
 import { resolveDomain } from '../core/domain.js';
-import { WORKSPACE, HISTORY_DIR, MOCK, GITHUB_PUSH } from '../core/config.js';
+import { HISTORY_DIR, MOCK, GITHUB_PUSH } from '../core/config.js';
 import { ensureProductRepo, slugify } from '../core/github.js';
 
 const PROJECT_PROTOCOLS = new Set(['wish', 'problem', 'spec']);
@@ -31,13 +40,18 @@ const PROJECT_PROTOCOLS = new Set(['wish', 'problem', 'spec']);
 // (за сеанс их обычно несколько: у каждого запроса свой).
 const SESSION_STARTED_AT = Date.now();
 
+// §29.1: активный проект сеанса — состояние процесса, не аргумент каждой
+// функции по отдельности (та же роль, что раньше играл 'default', но теперь
+// это реальная запись в таблице projects, не строковый литерал).
+let activeProject = null;
+
 function backupWorkspaceHistory(label) {
-  if (!fs.existsSync(WORKSPACE)) return;
+  if (!activeProject || !fs.existsSync(activeProject.workspace_dir)) return;
   try {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const dest = path.join(HISTORY_DIR, `${stamp}-${label}`);
+    const dest = path.join(HISTORY_DIR, `${activeProject.id}-${stamp}-${label}`);
     fs.mkdirSync(HISTORY_DIR, { recursive: true });
-    fs.cpSync(WORKSPACE, dest, { recursive: true });
+    fs.cpSync(activeProject.workspace_dir, dest, { recursive: true });
   } catch (e) {
     console.error(`[talk] .history-бэкап не удался (продолжаю без него): ${e.message}`);
   }
@@ -56,6 +70,10 @@ function boardSummaryText(taskIds) {
  * это просто SQL-агрегация уже существующих данных, не новый учёт стоимости;
  * $ берётся из events.cost_usd, который gateway.js уже посчитал по условным
  * ценам тиров из config.js, когда claude-cli не вернул total_cost_usd сам).
+ * Общий итог за сеанс сознательно НЕ фильтруется по активному проекту —
+ * человек может переключаться между проектами в одном сеансе, а токены
+ * тратятся сеансом целиком (в отличие от задач, которые принадлежат ровно
+ * одному проекту).
  */
 function formatTokenSummary(events, title) {
   const usage = events.filter((e) => e.type === 'usage');
@@ -105,23 +123,132 @@ function printSessionTokenSummary() {
   console.log(formatTokenSummary(listEventsSince(SESSION_STARTED_AT), 'Токены за сеанс (итого)'));
 }
 
+/**
+ * printStatus() — §29.2 п.3: только активный проект + честная строка "в
+ * других проектах", НИКОГДА не смешанная сводка по всей базе (это и был
+ * реальный инцидент — /status показывал счётчики чужих деревьев вперемешку).
+ */
 function printStatus() {
-  const tasks = listTasks({});
+  if (!activeProject) {
+    console.log('\n--- /status ---');
+    console.log('Нет активного проекта — см. /projects.');
+    printSessionTokenSummary();
+    return;
+  }
+  const tasks = listTasks({ project_id: activeProject.id });
   const byStatus = {};
   for (const t of tasks) byStatus[t.status] = (byStatus[t.status] || 0) + 1;
-  console.log('\n--- /status ---');
+  console.log(`\n--- /status (проект: ${activeProject.title}, ${activeProject.id}) ---`);
   console.log(JSON.stringify(byStatus));
   for (const t of tasks) {
     if (t.status === 'blocked_needs_human') {
       console.log(`  ⚠ ${t.id} "${t.title}" — ${t.question ? `вопрос: ${t.question}` : t.feedback}`);
     }
   }
+  const otherTasks = listTasks({}).filter((t) => t.project_id !== activeProject.id);
+  if (otherTasks.length) {
+    const otherByStatus = {};
+    for (const t of otherTasks) otherByStatus[t.status] = (otherByStatus[t.status] || 0) + 1;
+    console.log(`  в других проектах: ${JSON.stringify(otherByStatus)} (/projects — список)`);
+  }
   printSessionTokenSummary();
 }
 
+/** /projects — все проекты со счётчиками задач по статусам (§29.1). */
+function printProjects() {
+  const all = listProjects({});
+  if (!all.length) {
+    console.log('\nПроектов ещё нет — опишите задачу, чтобы создать первый.');
+    return;
+  }
+  console.log('\n--- /projects ---');
+  all.forEach((p, i) => {
+    const tasks = listTasks({ project_id: p.id });
+    const byStatus = {};
+    for (const t of tasks) byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+    const marker = activeProject && activeProject.id === p.id ? '→' : ' ';
+    console.log(`${marker} ${i + 1}. [${p.status}] ${p.title} (${p.id}) ${JSON.stringify(byStatus)}`);
+  });
+}
+
+/** /project <номер|id> — переключить активный проект (§29.1). */
+function switchActiveProject(arg) {
+  const all = listProjects({});
+  const byIndex = all[Number(arg) - 1];
+  const byId = all.find((p) => p.id === arg);
+  const target = byIndex || byId;
+  if (!target) {
+    console.log(`\nПроект не найден: "${arg}". См. /projects.`);
+    return;
+  }
+  activeProject = target;
+  touchProject(target.id);
+  console.log(`\nАктивный проект: ${target.title} (${target.id})`);
+}
+
+/**
+ * Выбор активного проекта на старте сеанса (§29.1): единственный active →
+ * он; несколько → печатается список, человек выбирает; ноль → остаётся null
+ * («нет активных проектов, опишите задачу» — первый wish/problem/spec его
+ * создаст). Чистое чтение + одна интерактивная развилка, вся логика решения
+ * "что делать при multiple/none" — здесь, а не в core/projects.js (та
+ * функция там намеренно неинтерактивна, resolveSingleActiveProject).
+ */
+async function pickActiveProjectAtStartup() {
+  const active = listProjects({ status: 'active' });
+  if (active.length === 1) {
+    activeProject = active[0];
+    console.log(`\nАктивный проект: ${activeProject.title} (${activeProject.id})`);
+    return;
+  }
+  if (active.length === 0) {
+    console.log('\nНет активных проектов — опишите задачу, чтобы создать первый (см. также /projects).');
+    return;
+  }
+  console.log('\nНесколько активных проектов:');
+  active.forEach((p, i) => console.log(`  ${i + 1}. ${p.title} (${p.id})`));
+  const choice = sanitizeLine(await question('Выберите номер (Enter — самый недавний): '));
+  if (!choice) {
+    activeProject = active[0]; // listProjects сортирует по last_active_at DESC
+  } else {
+    const byIndex = active[Number(choice) - 1];
+    const byId = active.find((p) => p.id === choice);
+    activeProject = byIndex || byId || active[0];
+  }
+  touchProject(activeProject.id);
+  console.log(`Активный проект: ${activeProject.title} (${activeProject.id})`);
+}
+
+/**
+ * Детерминированное правило рождения нового проекта (§29.1, НЕ отдано
+ * модели): вызывается только для route wish/problem/spec. Активного проекта
+ * нет → новый молча (нечего уточнять). Активный есть → один короткий вопрос
+ * харнесса (не модели): Enter — это про текущий проект, любой другой
+ * непустой ответ — трактуется как «новый продукт».
+ */
+async function ensureProjectForNewWork(initialText) {
+  if (!activeProject) {
+    activeProject = createProject({ title: initialText.slice(0, 60) });
+    console.log(`\n[project] новый проект: ${activeProject.title} (${activeProject.id})`);
+    return;
+  }
+  const reply = sanitizeLine(await question(
+    `\nЭто про текущий проект "${activeProject.title}" или новый продукт? (Enter — текущий, любой текст — новый продукт)\n> `,
+  ));
+  if (reply) {
+    activeProject = createProject({ title: initialText.slice(0, 60) });
+    console.log(`[project] новый проект: ${activeProject.title} (${activeProject.id})`);
+  } else {
+    touchProject(activeProject.id);
+  }
+}
 
 async function runProjectFlow(protocol, initialText, runId) {
-  const existingRootSpec = getRootSpec('default');
+  await ensureProjectForNewWork(initialText);
+  const projectId = activeProject.id;
+  const workspaceDir = activeProject.workspace_dir;
+
+  const existingRootSpec = getRootSpec(projectId);
   const existingDefaults = existingRootSpec?.engineering_defaults
     ? JSON.parse(existingRootSpec.engineering_defaults) : [];
 
@@ -159,7 +286,7 @@ async function runProjectFlow(protocol, initialText, runId) {
   // это через COALESCE, здесь — явно, чтобы не звать эвристику впустую).
   const domain = existingRootSpec?.domain
     || resolveDomain(brief.domain, `${merged.spec}\n${merged.engineeringDefaults.join('\n')}`);
-  setRootSpec('default', merged.spec, merged.engineeringDefaults, protocol, domain);
+  setRootSpec(projectId, merged.spec, merged.engineeringDefaults, protocol, domain);
   backupWorkspaceHistory(protocol);
 
   // Архитектор получает ПОЛНУЮ (объединённую) картину продукта, не только
@@ -176,7 +303,7 @@ async function runProjectFlow(protocol, initialText, runId) {
   if (protocol === 'problem') {
     console.log('\n[researcher] оцениваю доступность данных...');
     const planResult = await planResearch({
-      brief: fullBrief, rootSpec: merged.spec, workspaceDir: WORKSPACE, runId, projectId: 'default',
+      brief: fullBrief, rootSpec: merged.spec, workspaceDir, runId, projectId,
     });
     if (!planResult.ok) {
       console.log(`\nИсследователь не смог построить план добычи данных: ${planResult.error}`);
@@ -186,10 +313,12 @@ async function runProjectFlow(protocol, initialText, runId) {
     if (!planResult.empty) {
       console.log(`[researcher] заказано: инструментов ${planResult.toolTaskIds.length}, запусков добычи ${planResult.toolRunTaskIds.length}`);
       (planResult.precheckLog || []).forEach((l) => console.log(`  ${l}`));
-      await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+      await runCoordinatorLoop({
+        role: 'coder', workspaceDir, runId, projectId,
+      });
 
       const evalResult = await evaluateResearch({
-        toolRunTaskIds: planResult.toolRunTaskIds, workspaceDir: WORKSPACE, runId,
+        toolRunTaskIds: planResult.toolRunTaskIds, workspaceDir, runId,
       });
       if (!evalResult.ok) {
         console.log(`\nИсследователь не смог оценить добытые данные: ${evalResult.error}`);
@@ -208,7 +337,7 @@ async function runProjectFlow(protocol, initialText, runId) {
   }
 
   await runBuildFlow({
-    protocol, brief, merged, fullBrief, runId, dataSummaryForReport, domain,
+    protocol, brief, merged, fullBrief, runId, dataSummaryForReport, domain, projectId, workspaceDir,
   });
 }
 
@@ -220,7 +349,7 @@ async function runProjectFlow(protocol, initialText, runId) {
  * дублировать его копипастой означало бы неизбежное расхождение при правках.
  */
 async function runBuildFlow({
-  protocol, brief, merged, fullBrief, runId, dataSummaryForReport, domain,
+  protocol, brief, merged, fullBrief, runId, dataSummaryForReport, domain, projectId, workspaceDir,
 }) {
   // Дизайн-контур (§27.1/27.2): только domain='ui', ДО архитектора — план
   // архитектора (§27.3, следующая стадия) должен видеть готовую систему.
@@ -230,7 +359,7 @@ async function runBuildFlow({
   // смысл этой роли.
   if (domain === 'ui') {
     console.log('\n[designer] издаю дизайн-систему проекта...');
-    const designerResult = await runDesigner({ brief: fullBrief, workspaceDir: WORKSPACE, runId });
+    const designerResult = await runDesigner({ brief: fullBrief, workspaceDir, runId });
     if (!designerResult.ok) {
       console.log(`\n[designer] не удалось издать дизайн-систему: ${designerResult.error}`);
       printRunTokenSummary(runId);
@@ -243,9 +372,9 @@ async function runBuildFlow({
     }
   }
 
-  const workspaceListing = listWorkspaceFileNames(WORKSPACE);
+  const workspaceListing = listWorkspaceFileNames(workspaceDir);
   const architectResult = await runArchitect({
-    brief: fullBrief, workspaceDir: WORKSPACE, workspaceListing, runId, projectId: 'default',
+    brief: fullBrief, workspaceDir, workspaceListing, runId, projectId,
   });
   if (!architectResult.ok) {
     console.log(`\nАрхитектор не смог построить план: ${architectResult.error}`);
@@ -259,7 +388,9 @@ async function runBuildFlow({
     for (const r of architectResult.uncoveredRequirements) console.log(`  - [${r.id}] ${r.text}`);
   }
 
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+  await runCoordinatorLoop({
+    role: 'coder', workspaceDir, runId, projectId,
+  });
   printStatus();
 
   const treeIds = [...architectResult.taskIds, architectResult.regressionId];
@@ -273,7 +404,7 @@ async function runBuildFlow({
   // Обживание (§9, Фаза 5.5) — ОДИН цикл на сдачу, только после зелёной доски.
   console.log('\n[live_in] обживаю продукт как первый пользователь...');
   const liveinResult = await runLivein({
-    rootSpec: merged.spec, workspaceDir: WORKSPACE, runId, projectId: 'default',
+    rootSpec: merged.spec, workspaceDir, runId, projectId,
   });
 
   let liveinSummary;
@@ -285,7 +416,9 @@ async function runBuildFlow({
     console.log(`\n[live_in] ${liveinSummary}`);
   } else {
     console.log(`\n[live_in] найдено шероховатостей: ${liveinResult.roughSpotsFound}, создано polish-задач: ${liveinResult.taskIds.length}`);
-    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+    await runCoordinatorLoop({
+      role: 'coder', workspaceDir, runId, projectId,
+    });
     liveinSummary = `найдено и обработано шероховатостей: ${liveinResult.roughSpotsFound}\n${boardSummaryText(liveinResult.taskIds)}`;
     printStatus();
   }
@@ -298,7 +431,7 @@ async function runBuildFlow({
     dataSources: dataSummaryForReport, runId,
   });
   console.log(report);
-  publishToGithub(merged.spec);
+  publishToGithub(merged.spec, workspaceDir);
   printRunTokenSummary(runId);
 }
 
@@ -310,10 +443,10 @@ async function runBuildFlow({
  * честная строка в сдаче, НЕ падение прогона (история задач уже сохранена
  * autoCommit'ом независимо от публикации).
  */
-function publishToGithub(rootSpecSummary) {
+function publishToGithub(rootSpecSummary, workspaceDir) {
   if (!MOCK && !GITHUB_PUSH) return;
   const name = slugify(rootSpecSummary);
-  const result = ensureProductRepo(WORKSPACE, name, { dryRun: MOCK });
+  const result = ensureProductRepo(workspaceDir, name, { dryRun: MOCK });
   if (result.dryRun) {
     console.log(`\n[github] MOCK dry-run (сеть не трогается): ${result.dryRunCmd}`);
   } else if (result.ok) {
@@ -324,6 +457,12 @@ function publishToGithub(rootSpecSummary) {
 }
 
 async function runTweakFlow(text, criteria, runId, verification = false) {
+  if (!activeProject) {
+    console.log('\nСначала выберите проект: /projects (или опишите задачу как новый продукт).');
+    return;
+  }
+  touchProject(activeProject.id);
+  const { id: projectId, workspace_dir: workspaceDir } = activeProject;
   backupWorkspaceHistory('tweak');
   // Verification-вход (шрам: «проверь фильтр» отроутилось в problem, советник
   // спросил у клиента то, что сам обязан был установить прогоном критериев):
@@ -332,10 +471,12 @@ async function runTweakFlow(text, criteria, runId, verification = false) {
   // сразу идёт в tester. Никакой новой генерации кода/проверки, ноль вопросов
   // клиенту до отчёта.
   const id = addTask({
-    title: text.slice(0, 80), spec: text, criteria: JSON.stringify(criteria), role: 'coder',
+    project_id: projectId, title: text.slice(0, 80), spec: text, criteria: JSON.stringify(criteria), role: 'coder',
     type: verification ? 'regression' : 'tweak',
   });
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+  await runCoordinatorLoop({
+    role: 'coder', workspaceDir, runId, projectId,
+  });
   const finalTask = getTask(id);
 
   if (finalTask.status === 'blocked_needs_human' && finalTask.type !== 'regression') {
@@ -361,12 +502,21 @@ async function runTweakFlow(text, criteria, runId, verification = false) {
  * (тот же принцип, что у интервью советника) → root_spec пополняется
  * (ТЗ-текст + ответы клиента) → общий хвост runBuildFlow (архитектор
  * получает требования с id и обязан трассировать covers).
+ *
+ * §29.1: /ingest пакета документов — всегда НОВЫЙ продукт (тот же принцип,
+ * что wish/problem/spec без активного проекта) — ТЗ-пакет описывает целый
+ * продукт с нуля, не инкремент существующего; человека не переспрашиваем.
  */
 async function runIngestFlow(folderPath) {
   if (!folderPath || !fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
     console.log(`\n/ingest: папка не найдена: ${folderPath || '(путь не указан)'}`);
     return;
   }
+  activeProject = createProject({ title: `ingest: ${path.basename(folderPath)}` });
+  console.log(`\n[project] новый проект: ${activeProject.title} (${activeProject.id})`);
+  const projectId = activeProject.id;
+  const workspaceDir = activeProject.workspace_dir;
+
   const runId = newRunId();
   console.log(`\n[ingest] читаю пакет документов: ${folderPath}`);
   const result = await runIngest({ folderPath, runId });
@@ -393,7 +543,7 @@ async function runIngestFlow(folderPath) {
     if (reply) answers.push(`[${q.req_id}] ${q.question} → ${reply}`);
   }
 
-  const existingRootSpec = getRootSpec('default');
+  const existingRootSpec = getRootSpec(projectId);
   const existingDefaults = existingRootSpec?.engineering_defaults
     ? JSON.parse(existingRootSpec.engineering_defaults) : [];
   const summary = [
@@ -406,7 +556,7 @@ async function runIngestFlow(folderPath) {
   // полем domain) — домен решается ЦЕЛИКОМ эвристикой по тексту ТЗ-пакета,
   // если проект ещё не решил его раньше.
   const domain = existingRootSpec?.domain || resolveDomain(null, summary);
-  setRootSpec('default', merged.spec, merged.engineeringDefaults, 'spec', domain);
+  setRootSpec(projectId, merged.spec, merged.engineeringDefaults, 'spec', domain);
   backupWorkspaceHistory('spec');
 
   const brief = {
@@ -415,7 +565,7 @@ async function runIngestFlow(folderPath) {
   const fullBrief = { ...brief, requirements: result.requirements };
 
   await runBuildFlow({
-    protocol: 'spec', brief, merged, fullBrief, runId, dataSummaryForReport: null, domain,
+    protocol: 'spec', brief, merged, fullBrief, runId, dataSummaryForReport: null, domain, projectId, workspaceDir,
   });
 }
 
@@ -425,10 +575,16 @@ async function handleLine(rawLine) {
 
   if (line === '/exit') { printSessionTokenSummary(); closeInput(); process.exit(0); }
   if (line === '/status') { printStatus(); return; }
+  if (line === '/projects') { printProjects(); return; }
+  if (line.startsWith('/project ')) { switchActiveProject(line.slice('/project '.length).trim()); return; }
   if (line === '/resume') {
-    const n = releaseStuck();
+    if (!activeProject) {
+      console.log('\nНет активного проекта — см. /projects.');
+      return;
+    }
+    const n = releaseStuck({ projectId: activeProject.id });
     console.log(`\n[resume] возвращено в pending: ${n}`);
-    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+    await runCoordinatorLoop({ role: 'coder', workspaceDir: activeProject.workspace_dir, projectId: activeProject.id });
     printStatus();
     return;
   }
@@ -444,15 +600,19 @@ async function handleLine(rawLine) {
   }
 
   const runId = newRunId();
-  const workspaceListing = listWorkspaceFileNames(WORKSPACE);
+  const workspaceListing = activeProject ? listWorkspaceFileNames(activeProject.workspace_dir) : [];
   // [router]-строка прогресса печатается внутри routeRequest() самой (agents/
   // router.js) — одинаково видна и здесь, и в npm run mock, который зовёт её напрямую.
   const routed = await routeRequest({ text: line, workspaceFiles: workspaceListing, runId });
 
   if (routed.route === 'question') {
-    const rootSpec = getRootSpec('default');
+    if (!activeProject) {
+      console.log('\nСначала выберите проект: /projects (или опишите задачу как новый продукт).');
+      return;
+    }
+    const rootSpec = getRootSpec(activeProject.id);
     const answer = await runAnalyst({
-      question: line, rootSpec: rootSpec?.spec, workspaceDir: WORKSPACE, runId,
+      question: line, rootSpec: rootSpec?.spec, workspaceDir: activeProject.workspace_dir, runId,
     });
     console.log(`\n${answer}`);
     return;
@@ -468,8 +628,9 @@ async function handleLine(rawLine) {
 }
 
 async function main() {
-  releaseStuck();
-  console.log('LOOM talk — сессия. Команды: /status /resume /exit. Опишите задачу:');
+  releaseStuck(); // глобальный sweep (§29.2 п.2: без projectId — до выбора активного проекта ничего другого не знаем)
+  console.log('LOOM talk — сессия. Команды: /status /resume /exit /projects /project. Опишите задачу:');
+  await pickActiveProjectAtStartup();
 
   // unhandledRejection-броня (шрам 25): ошибка в фоне не должна убивать сеанс.
   process.on('unhandledRejection', (e) => {

@@ -114,7 +114,7 @@ function buildLiveinPrompt(rootSpec, evidence) {
  * {ok, evidence, roughSpotsFound, taskIds} | {ok:false, error, evidence?}
  */
 export async function runLivein({
-  rootSpec, workspaceDir, entryFileName = 'index.html', runId, projectId = 'default',
+  rootSpec, workspaceDir, entryFileName = 'index.html', runId, projectId,
 }) {
   const evidence = await inspectProduct(workspaceDir, entryFileName);
   if (!evidence.ok) {

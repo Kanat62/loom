@@ -12,12 +12,18 @@
 // Запуск: node --env-file=.env --no-warnings evals/manual/parallel-real-run.js
 import { addTask, listTasks, newRunId } from '../../core/journal.js';
 import { runCoordinatorLoop } from '../../core/coordinator.js';
-import { WORKSPACE } from '../../core/config.js';
+import { ensureProject } from '../../core/projects.js';
 
 async function main() {
   const runId = newRunId();
+  // §29.1: ручной прогон вне talk.js — фиксированный служебный проект, не
+  // реальный продукт клиента (ensureProject идемпотентен, повторный запуск
+  // скрипта переиспользует тот же workspace_dir).
+  const project = ensureProject('manual-parallel-real-run', { title: 'РУЧНАЯ: Фаза 6 параллельность' });
+  const workspaceDir = project.workspace_dir;
 
   addTask({
+    project_id: project.id,
     title: 'Параллельный реальный прогон 1: file1.js',
     spec: 'Создай file1.js в корне workspace — module.exports = { n: 1 };',
     criteria: JSON.stringify({ cmd: "node -e \"const c=require('./file1.js'); if(c.n===1){console.log('PASS n=1')}else{console.error('FAIL: n='+c.n);process.exit(1)}\"" }),
@@ -26,6 +32,7 @@ async function main() {
     touches_files: ['file1.js'],
   });
   addTask({
+    project_id: project.id,
     title: 'Параллельный реальный прогон 2: file2.js',
     spec: 'Создай file2.js в корне workspace — module.exports = { n: 2 };',
     criteria: JSON.stringify({ cmd: "node -e \"const c=require('./file2.js'); if(c.n===2){console.log('PASS n=2')}else{console.error('FAIL: n='+c.n);process.exit(1)}\"" }),
@@ -36,6 +43,7 @@ async function main() {
   // 3/4 НЕ объявляют shared.js в touches_files (искусственный конфликт —
   // тот же приём, что MOCK-сценарий, реалистичный blind spot file-level weave).
   addTask({
+    project_id: project.id,
     title: 'Параллельный реальный прогон 3: file3.js + shared.js (версия A)',
     spec: 'Создай file3.js — module.exports = { n: 3 }; И ОТДЕЛЬНО shared.js — module.exports = { version: "A" };',
     criteria: JSON.stringify({ cmd: "node -e \"const c=require('./file3.js'); if(c.n===3){console.log('PASS n=3')}else{console.error('FAIL: n='+c.n);process.exit(1)}\"" }),
@@ -44,6 +52,7 @@ async function main() {
     touches_files: ['file3.js'],
   });
   addTask({
+    project_id: project.id,
     title: 'Параллельный реальный прогон 4: file4.js + shared.js (версия B)',
     spec: 'Создай file4.js — module.exports = { n: 4 }; И ОТДЕЛЬНО shared.js — module.exports = { version: "B" };',
     criteria: JSON.stringify({ cmd: "node -e \"const c=require('./file4.js'); if(c.n===4){console.log('PASS n=4')}else{console.error('FAIL: n='+c.n);process.exit(1)}\"" }),
@@ -54,10 +63,10 @@ async function main() {
 
   console.log('[parallel-real-run] 4 задачи созданы, запускаю 2 воркера...');
   await runCoordinatorLoop({
-    role: 'coder', workspaceDir: WORKSPACE, workers: 2, runId,
+    role: 'coder', workspaceDir, workers: 2, runId, projectId: project.id,
   });
 
-  const tasks = listTasks({ role: 'coder' }).filter((t) => t.title.startsWith('Параллельный реальный прогон'));
+  const tasks = listTasks({ role: 'coder', project_id: project.id }).filter((t) => t.title.startsWith('Параллельный реальный прогон'));
   for (const t of tasks) {
     console.log(`[parallel-real-run] ${t.title} → ${t.status} (попыток: ${t.attempts})`);
   }

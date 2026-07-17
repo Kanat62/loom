@@ -11,7 +11,7 @@ import {
   listTasks, getTask, listEvents, getRootSpec, newRunId,
 } from '../core/journal.js';
 import { runAnalyst } from '../agents/advisor.js';
-import { WORKSPACE } from '../core/config.js';
+import { resolveSingleActiveProject, getProject } from '../core/projects.js';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.DASH_PORT || 4173);
@@ -164,7 +164,11 @@ export function createDashServer() {
     }
 
     if (req.method === 'GET' && url.pathname === '/api/tasks') {
-      sendJson(res, 200, listTasks({}));
+      // §29.1: наблюдение — не запись, поэтому честно показываем ВСЕ
+      // проекты (с project_id в каждой задаче), если ?project= не задан
+      // явно; ?project=<id> сужает список, как /status в talk.js.
+      const projectFilter = url.searchParams.get('project');
+      sendJson(res, 200, listTasks(projectFilter ? { project_id: projectFilter } : {}));
       return;
     }
 
@@ -179,14 +183,23 @@ export function createDashServer() {
     if (req.method === 'POST' && url.pathname === '/api/ask') {
       const raw = await readBody(req);
       let question = '';
-      try { ({ question } = JSON.parse(raw || '{}')); } catch { question = ''; }
+      let projectId = '';
+      try { ({ question, project: projectId } = JSON.parse(raw || '{}')); } catch { question = ''; }
       if (typeof question !== 'string' || !question.trim()) {
         sendJson(res, 400, { error: 'question обязателен и должен быть непустой строкой' });
         return;
       }
-      const rootSpec = getRootSpec('default');
+      // §29.1: /api/ask пишет НЕ на доску, но всё равно должен знать, ЧЕЙ
+      // rootSpec читать — явный project в теле запроса или, если он один
+      // активный, резолвится сам; неоднозначность — честная 400, не гадание.
+      const project = projectId ? getProject(projectId) : resolveSingleActiveProject().project;
+      if (!project) {
+        sendJson(res, 400, { error: 'не удалось определить проект — передайте {question, project} явно (см. /api/tasks для списка project_id)' });
+        return;
+      }
+      const rootSpec = getRootSpec(project.id);
       const answer = await runAnalyst({
-        question, rootSpec: rootSpec?.spec, workspaceDir: WORKSPACE, runId: newRunId(),
+        question, rootSpec: rootSpec?.spec, workspaceDir: project.workspace_dir, runId: newRunId(),
       });
       sendJson(res, 200, { answer });
       return;

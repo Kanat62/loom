@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import { addTask, getTask, releaseStuck } from '../core/journal.js';
 import { runCoordinatorLoop } from '../core/coordinator.js';
+import { resolveSingleActiveProject, getProject } from '../core/projects.js';
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -33,8 +34,19 @@ function usage() {
 }
 
 async function main() {
-  releaseStuck();
   const args = parseArgs(process.argv.slice(2));
+
+  // §29.1: cli.js — ad-hoc задача, ей всё равно нужен проект. --project явно
+  // ИЛИ (ровно один активный проект) — иначе честная ошибка вместо угадывания.
+  const project = args.project ? getProject(args.project) : resolveSingleActiveProject().project;
+  if (!project) {
+    console.error(args.project
+      ? `[cli] проект не найден: ${args.project}`
+      : '[cli] не удалось определить проект однозначно — передайте --project <id> (см. npm run talk -> /projects).');
+    process.exit(1);
+    return;
+  }
+  releaseStuck({ projectId: project.id });
 
   let taskDef;
   if (args.file) {
@@ -60,10 +72,12 @@ async function main() {
     return;
   }
 
-  const id = addTask(taskDef);
-  console.log(`[cli] задача создана: ${id}`);
+  const id = addTask({ project_id: project.id, ...taskDef });
+  console.log(`[cli] задача создана: ${id} (проект ${project.id})`);
 
-  await runCoordinatorLoop({ role: taskDef.role || 'coder' });
+  await runCoordinatorLoop({
+    role: taskDef.role || 'coder', workspaceDir: project.workspace_dir, projectId: taskDef.project_id || project.id,
+  });
 
   const finalTask = getTask(id);
   console.log(`[cli] финальный статус задачи ${id}: ${finalTask.status} (попыток: ${finalTask.attempts})`);

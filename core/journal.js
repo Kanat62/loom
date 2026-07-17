@@ -72,6 +72,17 @@ function migrate(d) {
       created_at INTEGER
     );
 
+    -- §29.1 (шрам 35): проект — первоклассная сущность, не только колонка.
+    -- workspace_dir — <WORKSPACE>/<id>/ (core/projects.js:projectWorkspaceDir).
+    CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY,
+      title TEXT,
+      workspace_dir TEXT,
+      status TEXT DEFAULT 'active',
+      created_at INTEGER,
+      last_active_at INTEGER
+    );
+
     -- П§2 DEV_GUIDE part2: фундамент Кузницы (§26) и настоящего fan-in (Фаза 6).
     CREATE TABLE IF NOT EXISTS tools (
       name TEXT PRIMARY KEY,
@@ -175,10 +186,16 @@ export function addTask(t) {
 }
 
 /**
- * claimNext(role, claimedBy, {activeTouches, excludeTypes}) -> task|null
- * BEGIN IMMEDIATE: pending, роль совпадает, И одиночная зависимость (если
- * есть) done/merged, И все зависимости из task_deps (если есть) done/merged
- * (П§2: настоящий fan-in — обе формы должны быть удовлетворены одновременно).
+ * claimNext(role, claimedBy, {projectId, activeTouches, excludeTypes}) -> task|null
+ * BEGIN IMMEDIATE: pending, роль совпадает, проект совпадает, И одиночная
+ * зависимость (если есть) done/merged, И все зависимости из task_deps (если
+ * есть) done/merged (П§2: настоящий fan-in — обе формы должны быть
+ * удовлетворены одновременно).
+ *
+ * projectId (§29.2 п.1, шрам 35: «колонка в схеме — не изоляция»)
+ * ОБЯЗАТЕЛЕН — тихий скан по всей базе без фильтра проекта и есть тот самый
+ * реальный инцидент (координатор одного проекта исполнял чужие деревья).
+ * Вызов без projectId — исключение (fail-loud), не молчаливый полный скан.
  *
  * activeTouches (Фаза 6, П§5 weave по файлам) — необязательный массив путей,
  * которые уже трогают ДРУГИЕ claimed/merge_pending задачи прямо сейчас;
@@ -196,13 +213,16 @@ export function addTask(t) {
  * §16 п.8, «регрессия строго после пустой очереди мёржей» — воркер их не трогает,
  * дожидается последовательной фазы после параллельной).
  */
-export function claimNext(role, claimedBy = 'worker', { activeTouches, excludeTypes } = {}) {
+export function claimNext(role, claimedBy = 'worker', { projectId, activeTouches, excludeTypes } = {}) {
+  if (!projectId) {
+    throw new Error('claimNext: projectId обязателен (§29.2 п.1) — тихий скан по всей базе запрещён (шрам 35)');
+  }
   const d = db();
   d.exec('BEGIN IMMEDIATE');
   try {
     let candidates = d.prepare(`
       SELECT t.* FROM tasks t
-      WHERE t.status = 'pending' AND t.role = ?
+      WHERE t.status = 'pending' AND t.role = ? AND t.project_id = ?
         AND (
           t.blocked_by_task_id IS NULL
           OR EXISTS (
@@ -215,7 +235,7 @@ export function claimNext(role, claimedBy = 'worker', { activeTouches, excludeTy
           WHERE td.task_id = t.id AND bt.status NOT IN ('done','merged')
         )
       ORDER BY t.created_at ASC
-    `).all(role);
+    `).all(role, projectId);
 
     if (excludeTypes && excludeTypes.length) {
       const ex = new Set(excludeTypes);
@@ -298,18 +318,27 @@ export function isOverBudget(id) {
 }
 
 /**
- * releaseStuck() — убитый процесс оставляет claimed-задачи; возвращаем в
- * pending (шрам 25). 'suspected_criteria_defect' (scar 34) — тот же класс
- * «процесс мог умереть посреди этого шага»: review-звонок к архитектору
- * идёт синхронно внутри handleAttemptFailure, статус в БД виден только на
- * время этого звонка — но если процесс умрёт именно тогда, задача не должна
- * зависнуть навечно в промежуточном статусе, как claimed.
+ * releaseStuck({projectId}) — убитый процесс оставляет claimed-задачи;
+ * возвращаем в pending (шрам 25). 'suspected_criteria_defect' (scar 34) —
+ * тот же класс «процесс мог умереть посреди этого шага»: review-звонок к
+ * архитектору идёт синхронно внутри handleAttemptFailure, статус в БД виден
+ * только на время этого звонка — но если процесс умрёт именно тогда, задача
+ * не должна зависнуть навечно в промежуточном статусе, как claimed.
+ *
+ * projectId (§29.2 п.2) необязателен, В ОТЛИЧИЕ от claimNext: без него —
+ * честный глобальный sweep по всей базе (нужен на старте сеанса ДО выбора
+ * активного проекта, и утилитам вроде bin/cli.js/npm run race, которым
+ * незачем знать про конкретный проект). runCoordinatorLoop, где уже известен
+ * активный проект, передаёт projectId явно — иначе один процесс мог бы
+ * тронуть claimed-задачу ДРУГОГО одновременно живущего процесса на чужом
+ * проекте.
  */
-export function releaseStuck() {
-  const res = db().prepare(`
-    UPDATE tasks SET status='pending', claimed_by=NULL
-    WHERE status IN ('claimed', 'suspected_criteria_defect')
-  `).run();
+export function releaseStuck({ projectId } = {}) {
+  const where = projectId
+    ? `WHERE status IN ('claimed', 'suspected_criteria_defect') AND project_id = ?`
+    : `WHERE status IN ('claimed', 'suspected_criteria_defect')`;
+  const stmt = db().prepare(`UPDATE tasks SET status='pending', claimed_by=NULL ${where}`);
+  const res = projectId ? stmt.run(projectId) : stmt.run();
   return res.changes;
 }
 

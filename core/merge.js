@@ -197,17 +197,18 @@ async function mergeOneTask(task, workspaceDir, { runId, worktreesDir } = {}) {
 }
 
 /**
- * drainMergeQueue({role, workspaceDir, worktreesDir, workerIds, runId}) →
+ * drainMergeQueue({role, workspaceDir, worktreesDir, workerIds, runId, projectId}) →
  * число обработанных задач. Последовательно, ОДНА за раз (§16 п.4) — не
  * Promise.all, не параллельно самому себе: два одновременных git-мёржа в
- * ОДИН workspace физически несовместимы (один .git индекс).
+ * ОДИН workspace физически несовместимы (один .git индекс). projectId
+ * (§29.2 п.5) — очередь мёржей сжата до своего проекта, симметрично claimNext.
  */
 export async function drainMergeQueue({
-  role = 'coder', workspaceDir, worktreesDir, workerIds = [], runId, maxPerDay = AUTO_MERGES_PER_DAY,
+  role = 'coder', workspaceDir, worktreesDir, workerIds = [], runId, maxPerDay = AUTO_MERGES_PER_DAY, projectId,
 } = {}) {
   let processed = 0;
   for (;;) {
-    const pending = listTasks({ status: 'merge_pending', role }).sort((a, b) => a.created_at - b.created_at);
+    const pending = listTasks({ status: 'merge_pending', role, project_id: projectId }).sort((a, b) => a.created_at - b.created_at);
     const task = pending[0];
     if (!task) break;
 
@@ -237,12 +238,12 @@ export async function drainMergeQueue({
 }
 
 /** Fan-in политика (§16 п.7): failed, блокирующий недостигнутые done-ветки через task_deps → весь проект стоит. */
-export function hasBlockingFailure(role = 'coder') {
+export function hasBlockingFailure(role = 'coder', projectId) {
   const failedIds = new Set(
-    listTasks({ status: 'blocked_needs_human', role }).map((t) => t.id),
+    listTasks({ status: 'blocked_needs_human', role, project_id: projectId }).map((t) => t.id),
   );
   if (!failedIds.size) return false;
-  const pending = listTasks({ status: 'pending', role });
+  const pending = listTasks({ status: 'pending', role, project_id: projectId });
   for (const t of pending) {
     if (t.blocked_by_task_id && failedIds.has(t.blocked_by_task_id)) return true;
   }

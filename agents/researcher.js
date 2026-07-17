@@ -35,7 +35,7 @@ const FICTIONAL_DATA_CRITERIA = (tool) => ({
  * что architect.js строит для tool_run — код, не модель, отвечает за формат).
  */
 export async function planResearch({
-  brief, rootSpec, workspaceDir, runId, projectId = 'default', sandbox = 'local',
+  brief, rootSpec, workspaceDir, runId, projectId, sandbox = 'local',
 }) {
   let plan;
   try {

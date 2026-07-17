@@ -14,7 +14,8 @@ import { runCoordinatorLoop } from '../core/coordinator.js';
 import {
   getTask, newRunId, setRootSpec, getRootSpec, releaseStuck, listEvents, mergeRootSpec,
 } from '../core/journal.js';
-import { WORKSPACE, MOCK, GITHUB_PUSH } from '../core/config.js';
+import { createProject } from '../core/projects.js';
+import { MOCK, GITHUB_PUSH } from '../core/config.js';
 import { ensureProductRepo, slugify } from '../core/github.js';
 
 function boardSummaryText(taskIds) {
@@ -32,10 +33,10 @@ function printTokenSummary(runId) {
   console.log(`вызовов: ${usage.length}, $: ${cost.toFixed(4)}`);
 }
 
-function publishToGithub(rootSpecSummary) {
+function publishToGithub(rootSpecSummary, workspaceDir) {
   if (!MOCK && !GITHUB_PUSH) return;
   const name = slugify(rootSpecSummary);
-  const result = ensureProductRepo(WORKSPACE, name, { dryRun: MOCK });
+  const result = ensureProductRepo(workspaceDir, name, { dryRun: MOCK });
   if (result.dryRun) {
     console.log(`\n[github] MOCK dry-run (сеть не трогается): ${result.dryRunCmd}`);
   } else if (result.ok) {
@@ -52,7 +53,13 @@ async function main() {
     process.exit(1);
   }
 
-  releaseStuck();
+  // §29.1: /ingest — всегда НОВЫЙ проект (ТЗ-пакет описывает продукт с нуля,
+  // тот же принцип, что bin/talk.js:runIngestFlow).
+  const project = createProject({ title: `ingest: ${folderPath}` });
+  const workspaceDir = project.workspace_dir;
+  console.log(`[ingest] новый проект: ${project.title} (${project.id})`);
+
+  releaseStuck({ projectId: project.id });
   const runId = newRunId();
   console.log(`[ingest] читаю пакет документов: ${folderPath}`);
   const result = await runIngest({ folderPath, runId });
@@ -79,7 +86,7 @@ async function main() {
   }
   closeInput();
 
-  const existingRootSpec = getRootSpec('default');
+  const existingRootSpec = getRootSpec(project.id);
   const existingDefaults = existingRootSpec?.engineering_defaults
     ? JSON.parse(existingRootSpec.engineering_defaults) : [];
   const summary = [
@@ -88,16 +95,16 @@ async function main() {
     answers.length ? `\nОтветы клиента на дыры/противоречия:\n${answers.join('\n')}` : '',
   ].join('\n');
   const merged = mergeRootSpec(existingRootSpec, summary, existingDefaults);
-  setRootSpec('default', merged.spec, merged.engineeringDefaults, 'spec');
+  setRootSpec(project.id, merged.spec, merged.engineeringDefaults, 'spec');
 
   const brief = {
     protocol: 'spec', request: `/ingest ${folderPath}`, summary: merged.spec, engineering_defaults: merged.engineeringDefaults, problem: null,
   };
   const fullBrief = { ...brief, requirements: result.requirements };
 
-  const workspaceListing = listWorkspaceFileNames(WORKSPACE);
+  const workspaceListing = listWorkspaceFileNames(workspaceDir);
   const architectResult = await runArchitect({
-    brief: fullBrief, workspaceDir: WORKSPACE, workspaceListing, runId, projectId: 'default',
+    brief: fullBrief, workspaceDir, workspaceListing, runId, projectId: project.id,
   });
   if (!architectResult.ok) {
     console.error(`\nАрхитектор не смог построить план: ${architectResult.error}`);
@@ -111,7 +118,9 @@ async function main() {
     for (const r of architectResult.uncoveredRequirements) console.log(`  - [${r.id}] ${r.text}`);
   }
 
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+  await runCoordinatorLoop({
+    role: 'coder', workspaceDir, runId, projectId: project.id,
+  });
 
   const treeIds = [...architectResult.taskIds, architectResult.regressionId];
   const allDone = treeIds.every((id) => getTask(id)?.status === 'done');
@@ -123,7 +132,7 @@ async function main() {
 
   console.log('\n[live_in] обживаю продукт как первый пользователь...');
   const liveinResult = await runLivein({
-    rootSpec: merged.spec, workspaceDir: WORKSPACE, runId, projectId: 'default',
+    rootSpec: merged.spec, workspaceDir, runId, projectId: project.id,
   });
   let liveinSummary;
   if (!liveinResult.ok) {
@@ -134,7 +143,9 @@ async function main() {
     console.log(`\n[live_in] ${liveinSummary}`);
   } else {
     console.log(`\n[live_in] найдено шероховатостей: ${liveinResult.roughSpotsFound}, создано polish-задач: ${liveinResult.taskIds.length}`);
-    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+    await runCoordinatorLoop({
+      role: 'coder', workspaceDir, runId, projectId: project.id,
+    });
     liveinSummary = `найдено и обработано шероховатостей: ${liveinResult.roughSpotsFound}\n${boardSummaryText(liveinResult.taskIds)}`;
   }
 
@@ -145,7 +156,7 @@ async function main() {
     problem: null, boardSummary: boardSummaryText(allTreeIds), liveinSummary, runId,
   });
   console.log(report);
-  publishToGithub(merged.spec);
+  publishToGithub(merged.spec, workspaceDir);
   printTokenSummary(runId);
 }
 

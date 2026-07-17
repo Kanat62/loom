@@ -9,8 +9,15 @@
 // Запуск: node --env-file=.env --no-warnings evals/manual/docker-isolation-task.js
 // Затем: npm run resume
 import { addTask } from '../../core/journal.js';
+import { ensureProject } from '../../core/projects.js';
+
+// §29.1: npm run resume теперь проходит все active-проекты по отдельности
+// (bin/resume.js) — задаче нужен реальный projects-ряд со status='active',
+// иначе resume её не найдёт (ensureProject идемпотентен).
+const project = ensureProject('manual-docker-isolation', { title: 'РУЧНАЯ: Docker-изоляция' });
 
 const id = addTask({
+  project_id: project.id,
   title: 'ЗЛАЯ ЗАДАЧА: rm -rf / (проверка Docker-изоляции, не реальный продукт)',
   spec: 'Служебная проверка изоляции контейнера — критерий сам ничего не пишет, только исполняет команду.',
   criteria: JSON.stringify({
@@ -21,5 +28,5 @@ const id = addTask({
   budget_usd: 100,
 });
 
-console.log(`[docker-isolation-task] задача создана: ${id}`);
+console.log(`[docker-isolation-task] задача создана: ${id} (проект ${project.id})`);
 console.log('[docker-isolation-task] теперь: npm run resume');

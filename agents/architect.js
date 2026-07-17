@@ -169,7 +169,7 @@ export async function reviewCriterion({
  * {ok, taskIds, regressionId, packages, installOk, precheckLog} | {ok:false, error}
  */
 export async function runArchitect({
-  brief, workspaceDir, workspaceListing = [], runId, projectId = 'default', sandbox = 'local',
+  brief, workspaceDir, workspaceListing = [], runId, projectId, sandbox = 'local',
 }) {
   const userText = buildArchitectPrompt(brief, workspaceListing);
   let raw;

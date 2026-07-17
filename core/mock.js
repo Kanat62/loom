@@ -42,6 +42,12 @@ export function registerMockHandler(role, fn) {
   MOCK_HANDLERS[role] = fn;
 }
 
+// §29 (шрам 35): все MOCK-сценарии этого файла делят ОДИН фиксированный
+// project_id — это НЕ фолбэк, а сознательный выбор эквивалентного старому
+// поведению фикстур: сценарии проверяют РОЛИ/агентов/координатор, не сам
+// механизм изоляции проектов (тот проверяется отдельно, runProjectIsolationScenario).
+export const MOCK_PROJECT_ID = 'mock-scenario';
+
 // --- Фаза 1: coder --------------------------------------------------------
 // Задачи различаются по содержимому userMsg (заголовок задачи виден в
 // "## Задача"), не по глобальному счётчику вызовов — так сценарий не зависит
@@ -666,7 +672,7 @@ async function runCalculatorScenario() {
   const { runCoordinatorLoop } = await import('./coordinator.js');
   const { WORKSPACE } = await import('./config.js');
 
-  const calcId = addTask({
+  const calcId = addTask({ project_id: MOCK_PROJECT_ID, 
     title: 'calc.js: экспортирует add(a,b) и subtract(a,b)',
     spec: 'Создай calc.js в корне workspace. module.exports = { add, subtract }. add(a,b) = a+b, subtract(a,b) = a-b.',
     criteria: JSON.stringify({
@@ -676,7 +682,7 @@ async function runCalculatorScenario() {
     type: 'project',
   });
 
-  const pageId = addTask({
+  const pageId = addTask({ project_id: MOCK_PROJECT_ID, 
     title: 'index.html: калькулятор подключает calc.js и показывает 2+3 и 5-2',
     spec: 'Создай index.html. Подключи calc.js через <script src="calc.js"></script>. В теле должны быть числа 5 и 3 как результаты 2+3 и 5-2.',
     criteria: JSON.stringify({
@@ -688,7 +694,7 @@ async function runCalculatorScenario() {
   });
 
   console.log(`[mock] calculator: задачи созданы calc=${calcId}, page=${pageId}`);
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE });
 
   const calcTask = getTask(calcId);
   const pageTask = getTask(pageId);
@@ -730,10 +736,10 @@ async function runProjectPipelineScenario() {
   if (step.type !== 'ready') throw new Error('project pipeline: мок-советник должен сразу вернуть ready');
 
   const brief = buildBrief({ protocol: 'wish', initialText: text, step });
-  setRootSpec('default', brief.summary, brief.engineering_defaults, 'wish');
+  setRootSpec(MOCK_PROJECT_ID, brief.summary, brief.engineering_defaults, 'wish');
 
   const architectResult = await runArchitect({
-    brief, workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: 'default',
+    brief, workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: MOCK_PROJECT_ID,
   });
   if (!architectResult.ok) throw new Error(`project pipeline: architect failed: ${architectResult.error}`);
   if (architectResult.taskIds.length !== 2) {
@@ -741,7 +747,7 @@ async function runProjectPipelineScenario() {
   }
   architectResult.precheckLog.forEach((l) => console.log(`[mock]   ${l}`));
 
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE });
 
   const allIds = [...architectResult.taskIds, architectResult.regressionId];
   const finalTasks = allIds.map(getTask);
@@ -758,12 +764,12 @@ async function runProjectPipelineScenario() {
   const { runLivein } = await import('../agents/livein.js');
   const { buildConsultantReport } = await import('../agents/advisor.js');
 
-  const liveinResult = await runLivein({ rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: 'default' });
+  const liveinResult = await runLivein({ rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: MOCK_PROJECT_ID });
   if (!liveinResult.ok) throw new Error(`live_in: не удалось осмотреть продукт: ${liveinResult.error}`);
   if (liveinResult.roughSpotsFound < 1) throw new Error('live_in: ожидали ≥1 реальную шероховатость (отсутствие meta viewport), нашли 0');
   console.log(`[mock] live_in: найдено шероховатостей ${liveinResult.roughSpotsFound}, создано polish-задач ${liveinResult.taskIds.length}`);
 
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE });
   const polishTasks = liveinResult.taskIds.map(getTask);
   if (!polishTasks.every((t) => t.status === 'done')) {
     throw new Error(`live_in: polish-задача(и) не закрылись: ${polishTasks.map((t) => t.status).join(', ')}`);
@@ -805,10 +811,10 @@ async function runTweakScenario() {
   if (routed.route !== 'tweak') throw new Error(`tweak: ожидали route=tweak, получили ${routed.route}`);
   if (!routed.criteria) throw new Error('tweak: router не вернул criteria (контракт §1 нарушен)');
 
-  const id = addTask({
+  const id = addTask({ project_id: MOCK_PROJECT_ID, 
     title: text, spec: text, criteria: JSON.stringify(routed.criteria), role: 'coder', type: 'tweak',
   });
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE });
 
   const task = getTask(id);
   console.log(`[mock] tweak: status=${task.status} attempts=${task.attempts}`);
@@ -830,7 +836,7 @@ async function runQuestionScenario() {
   const routed = await routeRequest({ text, workspaceFiles: listWorkspaceFileNames(WORKSPACE), runId });
   if (routed.route !== 'question') throw new Error(`question: ожидали route=question, получили ${routed.route}`);
 
-  const rootSpec = getRootSpec('default');
+  const rootSpec = getRootSpec(MOCK_PROJECT_ID);
   const answer = await runAnalyst({
     question: text, rootSpec: rootSpec?.spec, workspaceDir: WORKSPACE, runId,
   });
@@ -847,11 +853,11 @@ async function runPathLockScenario() {
 
   const runId = newRunId();
   const title = 'ТЕСТ_ПУТЬ_НАРУШЕНИЕ: попытка выйти из workspace';
-  const id = addTask({
+  const id = addTask({ project_id: MOCK_PROJECT_ID, 
     title, spec: title, criteria: JSON.stringify({ cmd: 'node -e "console.log(\'PASS\')"' }), role: 'coder', type: 'project', budget_usd: 100,
   });
 
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE });
 
   const task = getTask(id);
   console.log(`[mock] path-lock: status=${task.status} attempts=${task.attempts}`);
@@ -895,7 +901,7 @@ async function runCriteriaDefectScenario() {
   });
 
   const titleRepair = 'ТЕСТ_БРАК_КРИТЕРИЯ_ЧИНИМ: notes.txt с цифрой';
-  const idRepair = addTask({
+  const idRepair = addTask({ project_id: MOCK_PROJECT_ID, 
     title: titleRepair,
     spec: 'Создай notes.txt с любым текстом, содержащим хотя бы одну цифру.',
     criteria: JSON.stringify({
@@ -909,7 +915,7 @@ async function runCriteriaDefectScenario() {
   });
 
   const titleConfirm = 'ТЕСТ_БРАК_КРИТЕРИЯ_ПОДТВЕРЖДАЕМ: notes2.txt с SECRET_WORD';
-  const idConfirm = addTask({
+  const idConfirm = addTask({ project_id: MOCK_PROJECT_ID, 
     title: titleConfirm,
     spec: 'Создай notes2.txt, содержащий слово SECRET_WORD.',
     criteria: JSON.stringify({
@@ -920,7 +926,7 @@ async function runCriteriaDefectScenario() {
     budget_usd: 100,
   });
 
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE });
 
   const repaired = getTask(idRepair);
   console.log(`[mock] criteria-defect (чиним): status=${repaired.status} attempts=${repaired.attempts}`);
@@ -990,17 +996,17 @@ async function runForgeScenario() {
   if (step.type !== 'ready') throw new Error('forge: мок-советник должен сразу вернуть ready');
 
   const brief = buildBrief({ protocol: 'wish', initialText: text, step });
-  setRootSpec('default', brief.summary, brief.engineering_defaults, 'wish');
+  setRootSpec(MOCK_PROJECT_ID, brief.summary, brief.engineering_defaults, 'wish');
 
   const architectResult = await runArchitect({
-    brief, workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: 'default',
+    brief, workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: MOCK_PROJECT_ID,
   });
   if (!architectResult.ok) throw new Error(`forge: architect failed: ${architectResult.error}`);
   if (architectResult.taskIds.length !== 3) {
     throw new Error(`forge: ожидали 3 задачи (tool+tool_run+project), получили ${architectResult.taskIds.length}`);
   }
 
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE, runId });
 
   const allIds = [...architectResult.taskIds, architectResult.regressionId];
   const finalTasks = allIds.map(getTask);
@@ -1113,7 +1119,7 @@ async function runParallelScenario() {
   // --- 8 задач / 2 воркера: 6 «чистых» + 2 с искусственным конфликтом на shared.js ---
   const runId = newRunId();
   for (let n = 1; n <= 6; n++) {
-    addTask({
+    addTask({ project_id: MOCK_PROJECT_ID, 
       title: `Параллельная задача ${n}: file${n}.js`,
       spec: `Создай file${n}.js.`,
       criteria: JSON.stringify({ cmd: `node -e "const fs=require('fs'); if(fs.existsSync('file${n}.js')){console.log('PASS file${n}.js')}else{console.error('FAIL: file${n}.js missing');process.exit(1)}"` }),
@@ -1127,7 +1133,7 @@ async function runParallelScenario() {
   // в v1.0-final) — оба claim'ятся в одном раунде, оба пишут shared.js
   // разными версиями в СВОИХ worktree, конфликт всплывает на merge, не раньше.
   for (const [n, version] of [[7, 'A'], [8, 'B']]) {
-    addTask({
+    addTask({ project_id: MOCK_PROJECT_ID, 
       title: `Параллельная задача ${n}: file${n}.js + shared.js (версия ${version})`,
       spec: `Создай file${n}.js; также запиши shared.js версии ${version} (искусственный конфликт для проверки reconciler'а).`,
       criteria: JSON.stringify({ cmd: `node -e "const fs=require('fs'); if(fs.existsSync('file${n}.js')){console.log('PASS file${n}.js')}else{console.error('FAIL: file${n}.js missing');process.exit(1)}"` }),
@@ -1137,11 +1143,11 @@ async function runParallelScenario() {
     });
   }
 
-  await runCoordinatorLoop({
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID, 
     role: 'coder', workspaceDir: WORKSPACE, workers: 2, runId,
   });
 
-  const tasks = listTasks({ role: 'coder' }).filter((t) => t.title.startsWith('Параллельная задача'));
+  const tasks = listTasks({ role: 'coder', project_id: MOCK_PROJECT_ID }).filter((t) => t.title.startsWith('Параллельная задача'));
   console.log(`[mock] parallel: ${tasks.map((t) => `${t.title.split(':')[0]}=${t.status}`).join(', ')}`);
   if (tasks.length !== 8) throw new Error(`parallel: ожидали 8 задач, нашли ${tasks.length}`);
   if (!tasks.every((t) => t.status === 'merged')) {
@@ -1207,16 +1213,16 @@ async function runResearcherScenario() {
     if (step.type !== 'ready') throw new Error('researcher: мок-советник должен сразу вернуть ready для problem');
 
     const brief = buildBrief({ protocol: 'problem', initialText: text, step });
-    setRootSpec('default', brief.summary, brief.engineering_defaults, 'problem');
+    setRootSpec(MOCK_PROJECT_ID, brief.summary, brief.engineering_defaults, 'problem');
 
     const planResult = await planResearch({
-      brief, rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: 'default',
+      brief, rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: MOCK_PROJECT_ID,
     });
     if (!planResult.ok) throw new Error(`researcher: план (путь OK) не удался: ${planResult.error}`);
     if (planResult.empty) throw new Error('researcher: ожидали непустой план (need_tools/tool_runs)');
     console.log(`[mock] researcher (OK): план — инструментов ${planResult.toolTaskIds.length}, запусков ${planResult.toolRunTaskIds.length}`);
 
-    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+    await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE, runId });
 
     const toolRunTasks = planResult.toolRunTaskIds.map(getTask);
     if (!toolRunTasks.every((t) => t.status === 'done')) {
@@ -1232,11 +1238,11 @@ async function runResearcherScenario() {
 
     const fullBrief = { ...brief, summary: `${brief.summary}\n\n[Данные]\n${evalResult.forArchitect}` };
     const architectResult = await runArchitect({
-      brief: fullBrief, workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: 'default',
+      brief: fullBrief, workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: MOCK_PROJECT_ID,
     });
     if (!architectResult.ok) throw new Error(`researcher: architect после исследования не удался: ${architectResult.error}`);
 
-    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+    await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE, runId });
     const allIds = [...architectResult.taskIds, architectResult.regressionId];
     const finalTasks = allIds.map(getTask);
     if (!finalTasks.every((t) => t.status === 'done')) {
@@ -1264,11 +1270,11 @@ async function runResearcherScenario() {
     const brief = buildBrief({ protocol: 'problem', initialText: text, step });
 
     const planResult = await planResearch({
-      brief, rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: 'default',
+      brief, rootSpec: brief.summary, workspaceDir: WORKSPACE, runId, projectId: MOCK_PROJECT_ID,
     });
     if (!planResult.ok) throw new Error(`researcher: план (путь NODATA) не удался: ${planResult.error}`);
 
-    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+    await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE, runId });
 
     const evalResult = await evaluateResearch({
       toolRunTaskIds: planResult.toolRunTaskIds, workspaceDir: WORKSPACE, runId,
@@ -1318,7 +1324,7 @@ async function runIngestScenario() {
     brief: {
       protocol: 'spec', request: 'ingest fixture', summary: result.combinedText, engineering_defaults: [], requirements: result.requirements,
     },
-    workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: 'default',
+    workspaceDir: WORKSPACE, workspaceListing: listWorkspaceFileNames(WORKSPACE), runId, projectId: MOCK_PROJECT_ID,
   });
   if (!architectResult.ok) throw new Error(`ingest: architect не удался: ${architectResult.error}`);
   if (architectResult.uncoveredRequirements.length !== 1) {
@@ -1329,7 +1335,7 @@ async function runIngestScenario() {
   }
   console.log(`[mock] ingest: architect не покрыл требование [${architectResult.uncoveredRequirements[0].id}] — трассировка covers честно это поймала.`);
 
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE, runId });
   const allIds = [...architectResult.taskIds, architectResult.regressionId];
   const finalTasks = allIds.map(getTask);
   if (!finalTasks.every((t) => t.status === 'done')) {
@@ -1344,7 +1350,7 @@ async function runDashboardSmokeScenario() {
   const { createDashServer } = await import('../bin/dash.js');
   const { addTask, getTask } = await import('./journal.js');
 
-  const taskId = addTask({
+  const taskId = addTask({ project_id: MOCK_PROJECT_ID, 
     title: 'ТЕСТ_ДАШБОРД: демо-задача для смоука',
     spec: 'демо',
     criteria: JSON.stringify({ cmd: 'node -e "console.log(\'PASS\')"' }),
@@ -1384,7 +1390,7 @@ async function runDashboardSmokeScenario() {
     }
 
     const askRes = await fetch(`${base}/api/ask`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: 'что делает calc.js?' }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: 'что делает calc.js?', project: MOCK_PROJECT_ID }),
     });
     const askData = await askRes.json();
     if (askRes.status !== 200 || typeof askData.answer !== 'string' || !askData.answer.trim()) {
@@ -1427,7 +1433,7 @@ async function runMaintenanceScenario() {
   // coordinator.js (только 'tool'/'tool_run'/'regression' там особые) —
   // значит он уже сегодня идёт обычным путём кодера, как tweak, безо всякой
   // новой ветки харнесса; тест это подтверждает, а не создаёт заново.
-  const id = addTask({
+  const id = addTask({ project_id: MOCK_PROJECT_ID, 
     // ВАЖНО: title намеренно НЕ содержит подстроку "calc.js" — мок-кодер
     // матчит по подстрокам в title (см. комментарии выше в этом файле про
     // isViewportPolish/isPage), а "calc.js" перехватывается веткой isCalc
@@ -1441,7 +1447,7 @@ async function runMaintenanceScenario() {
     role: 'coder',
     type: 'regression_detected',
   });
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE });
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE });
   const task = getTask(id);
   if (task.status !== 'done') throw new Error(`maintenance: regression_detected ожидали done (маршрут как у tweak), получили ${task.status}`);
   console.log('[mock] maintenance: type=regression_detected прошёл обычным путём кодера (как tweak, без особой ветки) — done.');
@@ -1452,7 +1458,7 @@ async function runMaintenanceScenario() {
   // повторного полного параллельного прогона (§16-гонка уже отдельно
   // проверена своим сценарием выше).
   logEvent({ type: 'merged', task_id: 'synthetic-prior-merge', payload: {} });
-  const pendingId = addTask({
+  const pendingId = addTask({ project_id: MOCK_PROJECT_ID, 
     title: 'синтетическая merge_pending задача для rate-limit',
     spec: '',
     criteria: JSON.stringify({ cmd: 'node -e "console.log(1)"' }),
@@ -1462,7 +1468,7 @@ async function runMaintenanceScenario() {
   setStatus(pendingId, 'claimed');
   setStatus(pendingId, 'merge_pending');
 
-  const processed = await drainMergeQueue({
+  const processed = await drainMergeQueue({ projectId: MOCK_PROJECT_ID, 
     workspaceDir: WORKSPACE, worktreesDir: '(не используется — гейт срабатывает раньше)', workerIds: [], maxPerDay: 1,
   });
   if (processed !== 0) throw new Error(`maintenance: rate-limit должен был остановить очередь ДО обработки, обработано ${processed}`);
@@ -1646,14 +1652,14 @@ async function runDesignerScenario() {
   // Доставка кодеру (§27.2): проверяем РЕАЛЬНЫЙ agents/coder.js:buildUserPrompt
   // (через настоящий runCoordinatorLoop→runCoder), не переимплементацию —
   // MOCK-ветка coder только читает userMsg на предмет блока, ничего не решает.
-  const deliveryId = addTask({
+  const deliveryId = addTask({ project_id: MOCK_PROJECT_ID, 
     title: 'ТЕСТ_ДИЗАЙН_ДОСТАВКА: страница показывает дизайн-систему',
     spec: 'служебная проверка доставки дизайн-системы кодеру',
     criteria: JSON.stringify({ cmd: 'node -e "console.log(\'PASS\')"' }),
     role: 'coder',
     type: 'project',
   });
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+  await runCoordinatorLoop({ projectId: MOCK_PROJECT_ID,  role: 'coder', workspaceDir: WORKSPACE, runId });
   const deliveryTask = getTask(deliveryId);
   if (deliveryTask.status !== 'done') {
     throw new Error(`designer delivery: служебная задача не дошла до done (status=${deliveryTask.status})`);
@@ -1829,6 +1835,135 @@ async function runSpecWriterScenario() {
   console.log(`[mock] spec_writer structural defect OK — ${brokenResult.error} — ровно одна повторная попытка, ничего не записано.`);
 }
 
+// --- Сценарий (§29.4): изоляция проектов — «два проекта», без единого -----
+// --- вызова модели. Покрывает пп.1-7 из §29.4 (docs/LOOM_TZ_v4_SECTION_29.md):
+// раздельный захват, /status-фильтр, releaseStuck по проекту, root_spec без
+// утечки, замок пути параметризован базой проекта, claimNext без projectId —
+// честное исключение (шрам 35). Миграция 'default'→'legacy' (п.8) — отдельный
+// сценарий Stage B (runLegacyMigrationScenario), не здесь.
+async function runProjectIsolationScenario() {
+  const {
+    addTask, getTask, listTasks, listEvents, getRootSpec, setRootSpec, claimNext, releaseStuck,
+  } = await import('./journal.js');
+  const { runCoordinatorLoop } = await import('./coordinator.js');
+  const { createProject } = await import('./projects.js');
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+
+  const projA = createProject({ title: 'ТЕСТ_ИЗОЛЯЦИЯ_A' });
+  const projB = createProject({ title: 'ТЕСТ_ИЗОЛЯЦИЯ_B' });
+  fsMod.mkdirSync(projA.workspace_dir, { recursive: true });
+  fsMod.mkdirSync(projB.workspace_dir, { recursive: true });
+
+  // --- 1. проект A (3 задачи) и проект B (2 задачи), обе pending -----------
+  const simpleCriteria = JSON.stringify({ cmd: 'node -e "console.log(\'PASS\')"' });
+  const aIds = [1, 2, 3].map((i) => addTask({
+    project_id: projA.id, title: `A-задача-${i}`, spec: `A-${i}`, criteria: simpleCriteria, role: 'coder', type: 'project',
+  }));
+  const bIds = [1, 2].map((i) => addTask({
+    project_id: projB.id, title: `B-задача-${i}`, spec: `B-${i}`, criteria: simpleCriteria, role: 'coder', type: 'project',
+  }));
+
+  // --- 2. координатор A видит только A (по events — ни одного claimed для B),
+  // затем координатор B — симметрично -----------------------------------
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: projA.workspace_dir, projectId: projA.id });
+  const aTasksAfterA = aIds.map(getTask);
+  if (!aTasksAfterA.every((t) => t.status === 'done')) {
+    throw new Error(`project-isolation: проект A не дошёл до done: ${aTasksAfterA.map((t) => t.status).join(',')}`);
+  }
+  const bTasksAfterA = bIds.map(getTask);
+  if (!bTasksAfterA.every((t) => t.status === 'pending')) {
+    throw new Error(`project-isolation: координатор A тронул задачи B: ${bTasksAfterA.map((t) => t.status).join(',')}`);
+  }
+  const claimedEvents = listEvents({ type: 'status' }).filter((e) => {
+    try { return JSON.parse(e.payload || '{}').event === 'claimed'; } catch { return false; }
+  });
+  if (claimedEvents.some((e) => bIds.includes(e.task_id))) {
+    throw new Error('project-isolation: событие claimed для задачи проекта B найдено во время прогона координатора A');
+  }
+
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: projB.workspace_dir, projectId: projB.id });
+  const bTasksAfterB = bIds.map(getTask);
+  if (!bTasksAfterB.every((t) => t.status === 'done')) {
+    throw new Error(`project-isolation: проект B не дошёл до done: ${bTasksAfterB.map((t) => t.status).join(',')}`);
+  }
+  console.log('[mock] project-isolation: координатор A обработал только задачи A, координатор B — только задачи B (по events ни одного захвата чужого проекта).');
+
+  // --- 3. listTasks(project_id=A) не видит B; сводка "в других проектах" ---
+  // честно считается отдельным запросом по всей базе, не смешивается -------
+  const tasksInA = listTasks({ project_id: projA.id });
+  if (tasksInA.some((t) => bIds.includes(t.id))) {
+    throw new Error('project-isolation: listTasks({project_id: A}) вернул задачу проекта B');
+  }
+  const otherProjectsPending = listTasks({}).filter((t) => t.project_id !== projA.id && t.status === 'pending').length;
+  console.log(`[mock] project-isolation: listTasks({project_id:A}) не содержит задач B; честная сводка "в других проектах" по всей базе отдельно (pending=${otherProjectsPending}).`);
+
+  // --- 4. releaseStuck({projectId:A}) не трогает claimed-задачу B ----------
+  const stuckA = addTask({
+    project_id: projA.id, title: 'A-застрявшая', spec: 'x', criteria: simpleCriteria, role: 'coder', type: 'project',
+  });
+  const stuckB = addTask({
+    project_id: projB.id, title: 'B-застрявшая', spec: 'x', criteria: simpleCriteria, role: 'coder', type: 'project',
+  });
+  claimNext('coder', 'ghost-worker', { projectId: projA.id });
+  claimNext('coder', 'ghost-worker', { projectId: projB.id });
+  releaseStuck({ projectId: projA.id });
+  const afterReleaseA = getTask(stuckA);
+  const afterReleaseB = getTask(stuckB);
+  if (afterReleaseA.status !== 'pending') {
+    throw new Error(`project-isolation: releaseStuck({projectId:A}) не освободил claimed-задачу A: ${afterReleaseA.status}`);
+  }
+  if (afterReleaseB.status !== 'claimed') {
+    throw new Error(`project-isolation: releaseStuck({projectId:A}) тронул claimed-задачу B: ${afterReleaseB.status}`);
+  }
+  releaseStuck({ projectId: projB.id }); // прибрать за собой, не влиять на дальнейшие сценарии
+  console.log('[mock] project-isolation: releaseStuck({projectId:A}) освободил claimed-задачу A и НЕ тронул claimed-задачу B.');
+
+  // --- 5. root_spec: wish в A, затем wish в B → root_spec(A) не содержит --
+  // ни слова из B ------------------------------------------------------------
+  setRootSpec(projA.id, 'Проект A: маркетплейс тапочек', ['Тёмная тема'], 'wish');
+  setRootSpec(projB.id, 'Проект B: трекер задач', ['Светлая тема'], 'wish');
+  const rootA = getRootSpec(projA.id);
+  if (rootA.spec.includes('трекер задач') || rootA.spec.includes('Проект B')) {
+    throw new Error(`project-isolation: root_spec(A) содержит текст проекта B: ${rootA.spec}`);
+  }
+  console.log('[mock] project-isolation: root_spec(A) не содержит ни слова из root_spec(B) — межпроектный мёрж невозможен по построению.');
+
+  // --- 6. замок пути параметризован базой ПРОЕКТА (не глобальным WORKSPACE):
+  // задача A пишет '../evil.js' относительно СВОЕГО workspace_dir →
+  // заблокировано + событие path_lock_blocked, ничего не материализуется ---
+  const evilTitle = 'ТЕСТ_ПУТЬ_НАРУШЕНИЕ: изоляция проектов, попытка выйти из workspace A';
+  const evilId = addTask({
+    project_id: projA.id, title: evilTitle, spec: evilTitle, criteria: simpleCriteria, role: 'coder', type: 'project', budget_usd: 100,
+  });
+  await runCoordinatorLoop({ role: 'coder', workspaceDir: projA.workspace_dir, projectId: projA.id });
+  const evilTask = getTask(evilId);
+  if (evilTask.status !== 'blocked_needs_human') {
+    throw new Error(`project-isolation: замок пути — ожидали blocked_needs_human, получили ${evilTask.status}`);
+  }
+  const pathLockEvents = listEvents({ task_id: evilId }).filter((e) => {
+    try { return JSON.parse(e.payload || '{}').event === 'path_lock_blocked'; } catch { return false; }
+  });
+  if (!pathLockEvents.length) throw new Error('project-isolation: событие path_lock_blocked не найдено для попытки выхода из workspace A');
+  const escapedFromA = pathMod.join(projA.workspace_dir, '..', 'evil.js');
+  if (fsMod.existsSync(escapedFromA)) {
+    throw new Error(`project-isolation: файл вне workspace проекта A всё-таки материализовался: ${escapedFromA}`);
+  }
+  console.log('[mock] project-isolation: замок пути держит база ПРОЕКТА A (не глобальный WORKSPACE) — попытка выйти из workspace A заблокирована и залогирована.');
+
+  // --- 7. claimNext без projectId — честное исключение (fail-loud, шрам 35) ---
+  let threwWithoutProjectId = false;
+  try {
+    claimNext('coder', 'no-project-worker', {});
+  } catch {
+    threwWithoutProjectId = true;
+  }
+  if (!threwWithoutProjectId) {
+    throw new Error('project-isolation: claimNext БЕЗ projectId обязан бросать исключение — тихий межпроектный скан запрещён (шрам 35)');
+  }
+  console.log('[mock] project-isolation: claimNext без projectId честно бросает исключение вместо тихого скана по всей базе.');
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -1858,6 +1993,12 @@ async function main() {
 
   const { releaseStuck } = await import('./journal.js');
   releaseStuck();
+  // §29.1: реальный projects-ряд для MOCK_PROJECT_ID — сценарии (calculator,
+  // forge, parallel, ...) годами ссылались на него строкой в project_id/
+  // projectId полей задач/root_spec, но никогда не заводили саму запись в
+  // таблице projects; dash.js:/api/ask теперь резолвит проект через неё.
+  const { ensureProject } = await import('./projects.js');
+  ensureProject(MOCK_PROJECT_ID, { title: 'MOCK-сценарии (общий)' });
 
   const scenarios = [
     ['calculator (Фаза 1/2)', runCalculatorScenario],
@@ -1879,6 +2020,7 @@ async function main() {
     ['designer: валидация токенов харнессом до записи — чинится/остаётся битым (§27.2)', runDesignerValidationScenario],
     ['доменный тег: явный домен побеждает эвристику, non-ui не тратит designer (§27.1)', runDomainGateScenario],
     ['spec_writer: запись ТЗ на успехе + структурный брак без "За рамками" → жёсткий останов (§28.2)', runSpecWriterScenario],
+    ['изоляция проектов: два проекта, раздельный захват/root_spec/замок пути, claimNext без projectId (§29.4 пп.1-7)', runProjectIsolationScenario],
   ];
 
   let failed = false;

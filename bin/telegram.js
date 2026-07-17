@@ -23,7 +23,8 @@ import { runCoordinatorLoop } from '../core/coordinator.js';
 import {
   addTask, getTask, newRunId, setRootSpec, getRootSpec, releaseStuck, mergeRootSpec,
 } from '../core/journal.js';
-import { WORKSPACE, MOCK } from '../core/config.js';
+import { ensureProject } from '../core/projects.js';
+import { MOCK } from '../core/config.js';
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const POLL_TIMEOUT_S = 30;
@@ -52,6 +53,17 @@ export function parseUpdate(update) {
 
 const sessions = new Map(); // chatId -> {protocol, history}
 
+/**
+ * §29.1: каждый Telegram-чат — свой проект (детерминированный id,
+ * `telegram-chat-<chatId>`, ensureProject идемпотентен). Telegram-вход
+ * сознательно урезан против talk.js (см. шапку файла) — здесь нет интервью
+ * «новый продукт или текущий», один чат = один проект на всё время жизни
+ * чата, простейшая безопасная интерпретация для необязательного входа.
+ */
+function projectForChat(chatId) {
+  return ensureProject(`telegram-chat-${chatId}`, { title: `Telegram chat ${chatId}` });
+}
+
 function boardSummaryText(taskIds) {
   return taskIds.map((id) => {
     const t = getTask(id);
@@ -61,25 +73,28 @@ function boardSummaryText(taskIds) {
 }
 
 async function finishProject(chatId, protocol, step, runId) {
-  const existingRootSpec = getRootSpec('default');
+  const project = projectForChat(chatId);
+  const existingRootSpec = getRootSpec(project.id);
   const brief = buildBrief({ protocol, initialText: sessions.get(chatId)?.history?.[0]?.text || '', step });
   const merged = mergeRootSpec(existingRootSpec, brief.summary, brief.engineering_defaults);
-  setRootSpec('default', merged.spec, merged.engineeringDefaults, protocol);
+  setRootSpec(project.id, merged.spec, merged.engineeringDefaults, protocol);
 
   await sendMessage(chatId, `Принял инженерные решения:\n${step.engineeringDefaults.map((d) => `- ${d}`).join('\n')}\n\nСтрою...`);
 
   const architectResult = await runArchitect({
     brief: { ...brief, summary: merged.spec, engineering_defaults: merged.engineeringDefaults },
-    workspaceDir: WORKSPACE,
-    workspaceListing: listWorkspaceFileNames(WORKSPACE),
+    workspaceDir: project.workspace_dir,
+    workspaceListing: listWorkspaceFileNames(project.workspace_dir),
     runId,
-    projectId: 'default',
+    projectId: project.id,
   });
   if (!architectResult.ok) {
     await sendMessage(chatId, `Архитектор не смог построить план: ${architectResult.error}`);
     return;
   }
-  await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+  await runCoordinatorLoop({
+    role: 'coder', workspaceDir: project.workspace_dir, runId, projectId: project.id,
+  });
 
   const treeIds = [...architectResult.taskIds, architectResult.regressionId];
   const allDone = treeIds.every((id) => getTask(id)?.status === 'done');
@@ -103,6 +118,7 @@ export async function handleIncoming({ chatId, text }) {
 
   const session = sessions.get(chatId);
   const runId = newRunId();
+  const project = projectForChat(chatId);
 
   if (session && session.awaitingReply) {
     const { protocol, history } = session;
@@ -121,12 +137,12 @@ export async function handleIncoming({ chatId, text }) {
     return;
   }
 
-  const routed = await routeRequest({ text, workspaceFiles: listWorkspaceFileNames(WORKSPACE), runId });
+  const routed = await routeRequest({ text, workspaceFiles: listWorkspaceFileNames(project.workspace_dir), runId });
 
   if (routed.route === 'question') {
-    const rootSpec = getRootSpec('default');
+    const rootSpec = getRootSpec(project.id);
     const answer = await runAnalyst({
-      question: text, rootSpec: rootSpec?.spec, workspaceDir: WORKSPACE, runId,
+      question: text, rootSpec: rootSpec?.spec, workspaceDir: project.workspace_dir, runId,
     });
     await sendMessage(chatId, answer);
     return;
@@ -134,9 +150,11 @@ export async function handleIncoming({ chatId, text }) {
 
   if (routed.route === 'tweak') {
     const id = addTask({
-      title: text.slice(0, 80), spec: text, criteria: JSON.stringify(routed.criteria), role: 'coder', type: 'tweak',
+      project_id: project.id, title: text.slice(0, 80), spec: text, criteria: JSON.stringify(routed.criteria), role: 'coder', type: 'tweak',
     });
-    await runCoordinatorLoop({ role: 'coder', workspaceDir: WORKSPACE, runId });
+    await runCoordinatorLoop({
+      role: 'coder', workspaceDir: project.workspace_dir, runId, projectId: project.id,
+    });
     const task = getTask(id);
     await sendMessage(chatId, `Готово: ${task.status}${task.feedback ? `\n${task.feedback}` : ''}`);
     return;

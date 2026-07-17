@@ -190,9 +190,9 @@ function sumRunCost(runId, taskId) {
     .reduce((sum, e) => sum + (e.cost_usd || 0), 0);
 }
 
-/** Сколько задач роли role ещё ждут — печатается вместе с вердиктом попытки. */
-function remainingCount(role) {
-  return listTasks({ status: 'pending', role }).length;
+/** Сколько задач роли role ещё ждут В ЭТОМ ПРОЕКТЕ — печатается вместе с вердиктом попытки. */
+function remainingCount(role, projectId) {
+  return listTasks({ status: 'pending', role, project_id: projectId }).length;
 }
 
 // Числа в отчёте тестера (координаты, счёт, тайминги) легитимно скачут
@@ -256,7 +256,7 @@ function detectCriteriaDefect(task, codeRoot) {
   return { reports };
 }
 
-async function handleAttemptFailure(task, runId, report, role, codeRoot) {
+async function handleAttemptFailure(task, runId, report, role, codeRoot, projectId) {
   const fresh = getTask(task.id);
   if (fresh.attempts >= MAX_ATTEMPTS) {
     const defect = detectCriteriaDefect(fresh, codeRoot);
@@ -298,11 +298,11 @@ async function handleAttemptFailure(task, runId, report, role, codeRoot) {
       payload: { event: 'max_attempts_reached', attempts: fresh.attempts },
     });
     clearEyesState(task.id);
-    progress(`[coordinator] задача failed (blocked_needs_human), осталось ${remainingCount(role)}`);
+    progress(`[coordinator] задача failed (blocked_needs_human), осталось ${remainingCount(role, projectId)}`);
     return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'max_attempts' };
   }
   setStatus(task.id, 'pending', { feedback: report });
-  progress(`[coordinator] задача failed (retry), осталось ${remainingCount(role)}`);
+  progress(`[coordinator] задача failed (retry), осталось ${remainingCount(role, projectId)}`);
   return { task: getTask(task.id), verdict: 'retry' };
 }
 
@@ -330,8 +330,12 @@ async function handleAttemptFailure(task, runId, report, role, codeRoot) {
  *   для них 'done' всегда означает готово по-настоящему.
  */
 export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, sharedRunId = null, opts = {}) {
+  const { projectId } = opts;
+  if (!projectId) {
+    throw new Error('processOneTask: opts.projectId обязателен (§29.2) — тихий межпроектный скан запрещён (шрам 35)');
+  }
   const task = opts.preClaimed || claimNext(role, opts.claimedBy || `coordinator-${process.pid}`, {
-    activeTouches: opts.activeTouches, excludeTypes: opts.excludeTypes,
+    projectId, activeTouches: opts.activeTouches, excludeTypes: opts.excludeTypes,
   });
   if (!task) return null;
 
@@ -358,7 +362,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
   if (isOverBudget(task.id)) {
     setStatus(task.id, 'blocked_needs_human', { feedback: 'FAIL: budget_usd задачи исчерпан до начала попытки' });
     clearEyesState(task.id);
-    progress(`[coordinator] задача failed (бюджет исчерпан), осталось ${remainingCount(role)}`);
+    progress(`[coordinator] задача failed (бюджет исчерпан), осталось ${remainingCount(role, projectId)}`);
     return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'budget' };
   }
 
@@ -379,7 +383,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
     let toolCall;
     try { toolCall = JSON.parse(task2.spec || '{}'); } catch { toolCall = {}; }
     if (typeof toolCall.tool !== 'string' || !toolCall.tool.trim()) {
-      return handleAttemptFailure(task, runId, 'FAIL: tool_run.spec обязан быть JSON {"tool":"name","args":[...]}, поле tool отсутствует', role, effectiveRoot);
+      return handleAttemptFailure(task, runId, 'FAIL: tool_run.spec обязан быть JSON {"tool":"name","args":[...]}, поле tool отсутствует', role, effectiveRoot, projectId);
     }
     // eslint-disable-next-line no-await-in-loop
     const runResult = await runTool(toolCall.tool, Array.isArray(toolCall.args) ? toolCall.args : [], {
@@ -399,7 +403,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
     if (coderResult.type === 'question') {
       setStatus(task.id, 'blocked_needs_human', { question: coderResult.question });
       clearEyesState(task.id);
-      progress(`[coordinator] задача failed (вопрос человеку), осталось ${remainingCount(role)}`);
+      progress(`[coordinator] задача failed (вопрос человеку), осталось ${remainingCount(role, projectId)}`);
       return { task: getTask(task.id), verdict: 'blocked_needs_human', reason: 'question' };
     }
     if (coderResult.type === 'error') {
@@ -411,7 +415,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
           payload: { event: 'path_lock_blocked', error: coderResult.error },
         });
       }
-      return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`, role, effectiveRoot);
+      return handleAttemptFailure(task, runId, `FAIL(coder): ${coderResult.error}`, role, effectiveRoot, projectId);
     }
     // Печать рядом с уже существующим usage-событием кодера (logEvent внутри
     // chat(), вызванного runCoder чуть выше).
@@ -445,7 +449,7 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
       // доверие построено на недоверии, не на слове тестера).
       const manifest = readToolManifest(effectiveRoot);
       if (!manifest) {
-        return handleAttemptFailure(task, runId, `${report}\nFAIL: критерий прошёл, но tool.json отсутствует или битый (обязателен §26.1) — инструмент НЕ зарегистрирован`.slice(0, 1000), role, effectiveRoot);
+        return handleAttemptFailure(task, runId, `${report}\nFAIL: критерий прошёл, но tool.json отсутствует или битый (обязателен §26.1) — инструмент НЕ зарегистрирован`.slice(0, 1000), role, effectiveRoot, projectId);
       }
       const registered = registerTool({
         name: manifest.name,
@@ -471,11 +475,11 @@ export async function processOneTask(role = 'coder', workspaceDir = WORKSPACE, s
     setStatus(task.id, finalStatus, { feedback: report });
     clearEyesState(task.id);
     await writeSkillSafely(task.id, runId);
-    progress(`[coordinator] задача ${finalStatus === 'merge_pending' ? 'готова к мёржу (merge_pending)' : 'done'}, осталось ${remainingCount(role)}`);
+    progress(`[coordinator] задача ${finalStatus === 'merge_pending' ? 'готова к мёржу (merge_pending)' : 'done'}, осталось ${remainingCount(role, projectId)}`);
     return { task: getTask(task.id), verdict: finalStatus };
   }
 
-  return handleAttemptFailure(task, runId, report, role, effectiveRoot);
+  return handleAttemptFailure(task, runId, report, role, effectiveRoot, projectId);
 }
 
 /** skill_writer — механически после done (§4); сбой этой роли не должен ронять координатор. */
@@ -499,8 +503,11 @@ async function writeSkillSafely(taskId, runId) {
  * видит захват предыдущего — однопоточность JS даёт это бесплатно, без
  * явной координации между воркерами.
  */
-function computeActiveTouches(role) {
-  const active = [...listTasks({ status: 'claimed', role }), ...listTasks({ status: 'merge_pending', role })];
+function computeActiveTouches(role, projectId) {
+  const active = [
+    ...listTasks({ status: 'claimed', role, project_id: projectId }),
+    ...listTasks({ status: 'merge_pending', role, project_id: projectId }),
+  ];
   const set = new Set();
   for (const t of active) {
     let touches;
@@ -510,25 +517,25 @@ function computeActiveTouches(role) {
   return [...set];
 }
 
-/** Есть ли хоть одна pending-задача, которая ИМЕЕТ смысл параллелить (не regression/tool_run — им нужен main). */
-function hasParallelizableWork(role) {
-  return listTasks({ status: 'pending', role }).some((t) => t.type !== 'regression' && t.type !== 'tool_run');
+/** Есть ли хоть одна pending-задача В ЭТОМ ПРОЕКТЕ, которая ИМЕЕТ смысл параллелить (не regression/tool_run — им нужен main). */
+function hasParallelizableWork(role, projectId) {
+  return listTasks({ status: 'pending', role, project_id: projectId }).some((t) => t.type !== 'regression' && t.type !== 'tool_run');
 }
 
 async function claimAndRunInWorktree({
-  workerId, role, workspaceDir, worktreesDir, runId,
+  workerId, role, workspaceDir, worktreesDir, runId, projectId,
 }) {
-  const activeTouches = computeActiveTouches(role);
+  const activeTouches = computeActiveTouches(role, projectId);
   const claimedBy = `w${workerId}`;
   // regression/tool_run исключены из параллельного захвата на уровне
   // claimNext (excludeTypes) — им нужен workspaceDir=main, не worktree
   // воркера (§16 п.8); последовательная фаза после параллельной их заберёт.
-  const task = claimNext(role, claimedBy, { activeTouches, excludeTypes: ['regression', 'tool_run'] });
+  const task = claimNext(role, claimedBy, { projectId, activeTouches, excludeTypes: ['regression', 'tool_run'] });
   if (!task) return null;
 
   const worktreePath = ensureWorktree(workspaceDir, worktreesDir, workerId);
   return processOneTask(role, worktreePath, runId, {
-    claimedBy, activeTouches, onSuccessStatus: 'merge_pending', preClaimed: task,
+    projectId, claimedBy, activeTouches, onSuccessStatus: 'merge_pending', preClaimed: task,
   });
 }
 
@@ -542,7 +549,7 @@ async function claimAndRunInWorktree({
  * фазой ПОСЛЕ этой функции, тем же кодом, что и однопоточный путь.
  */
 async function runParallelPhase({
-  role, workspaceDir, runId, workers, maxIterations,
+  role, workspaceDir, runId, workers, maxIterations, projectId,
 }) {
   ensureWorkspaceGit(workspaceDir);
   ensureInitialCommit(workspaceDir);
@@ -554,10 +561,10 @@ async function runParallelPhase({
   let iterations = 0;
   for (;;) {
     if (iterations >= maxIterations) break;
-    if (!hasParallelizableWork(role)) break;
+    if (!hasParallelizableWork(role, projectId)) break;
 
     const roundPromises = workerIds.map((id) => claimAndRunInWorktree({
-      workerId: id, role, workspaceDir, worktreesDir, runId,
+      workerId: id, role, workspaceDir, worktreesDir, runId, projectId,
     }));
     // eslint-disable-next-line no-await-in-loop
     const roundResults = await Promise.all(roundPromises);
@@ -566,7 +573,7 @@ async function runParallelPhase({
 
     // eslint-disable-next-line no-await-in-loop
     const mergedCount = await drainMergeQueue({
-      role, workspaceDir, worktreesDir, workerIds, runId,
+      role, workspaceDir, worktreesDir, workerIds, runId, projectId,
     });
 
     iterations++;
@@ -576,12 +583,17 @@ async function runParallelPhase({
 }
 
 /**
- * Цикл координатора: gitGuard pre-flight (шрам 5) → releaseStuck() на
- * КАЖДОМ входе (шрам 25 — задачи навечно в claimed после смерти процесса),
- * затем обработка задач роли role до опустошения очереди или maxIterations.
- * runId (опционально) — сквозной run_id одного клиентского запроса (talk.js);
- * без него, как и раньше, каждая захваченная задача получает свой (см.
- * processOneTask).
+ * Цикл координатора: gitGuard pre-flight (шрам 5) → releaseStuck({projectId})
+ * на КАЖДОМ входе (шрам 25 — задачи навечно в claimed после смерти процесса;
+ * §29.2 п.2 — сжато до СВОЕГО проекта, не трогает claimed-задачи другого
+ * одновременно живущего процесса на чужом проекте), затем обработка задач
+ * роли role до опустошения очереди или maxIterations.
+ * projectId (§29.2 п.5) ОБЯЗАТЕЛЕН — тот же fail-loud принцип, что у
+ * claimNext (шрам 35): без него первый же internal claimNext бросит
+ * исключение, но проверка здесь даёт понятную ошибку СРАЗУ, а не из глубины
+ * стека. runId (опционально) — сквозной run_id одного клиентского запроса
+ * (talk.js); без него, как и раньше, каждая захваченная задача получает свой
+ * (см. processOneTask).
  *
  * workers>1 (Фаза 6, П§5): сначала параллельная фаза (worktrees + merge
  * queue) для параллелящихся типов, ЗАТЕМ обычная последовательная фаза
@@ -590,18 +602,21 @@ async function runParallelPhase({
  * main, §16 п.8) и всё, что осталось после неё (retry-задачи, tool-задачи).
  */
 export async function runCoordinatorLoop({
-  role = 'coder', workspaceDir = WORKSPACE, maxIterations = Infinity, runId = null, workers = 1,
+  role = 'coder', workspaceDir = WORKSPACE, maxIterations = Infinity, runId = null, workers = 1, projectId,
 } = {}) {
+  if (!projectId) {
+    throw new Error('runCoordinatorLoop: projectId обязателен (§29.2 п.5) — тихий межпроектный запуск запрещён (шрам 35)');
+  }
   const guard = gitGuard();
   if (!guard.ok) {
     throw new Error(guard.message);
   }
-  releaseStuck();
+  releaseStuck({ projectId });
   const results = [];
 
   if (workers > 1) {
     const parallelResults = await runParallelPhase({
-      role, workspaceDir, runId, workers, maxIterations,
+      role, workspaceDir, runId, workers, maxIterations, projectId,
     });
     results.push(...parallelResults);
   }
@@ -609,7 +624,7 @@ export async function runCoordinatorLoop({
   let iterations = 0;
   for (;;) {
     if (iterations >= maxIterations) break;
-    const result = await processOneTask(role, workspaceDir, runId);
+    const result = await processOneTask(role, workspaceDir, runId, { projectId });
     if (!result) break;
     results.push(result);
     iterations++;
