@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { callAgent } from './engine.js';
+import { buildSpawnArgs } from './spawnUtil.js';
 import {
   mergeWorktree, readFileAtRef, resolveConflictFile, commitMerge, abortMerge,
   rebaseWorktreeOntoMain, currentBranch,
@@ -55,7 +56,7 @@ export function tscGate(worktreePath) {
   if (!tscBin) return { ok: true, skipped: true };
   const isWin = process.platform === 'win32';
   try {
-    execFileSync(tscBin, ['--noEmit'], {
+    execFileSync(tscBin, buildSpawnArgs(['--noEmit']), {
       cwd: worktreePath, stdio: 'pipe', shell: isWin, windowsHide: isWin, timeout: 60_000,
     });
     return { ok: true };

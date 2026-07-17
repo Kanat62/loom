@@ -14,6 +14,7 @@ import {
   TIER_PRICES_USD_PER_1M, TMP_DIR, MOCK, MOCK_CALL_COST_USD,
 } from './config.js';
 import { logEvent } from './journal.js';
+import { buildSpawnArgs } from './spawnUtil.js';
 
 fs.mkdirSync(TMP_DIR, { recursive: true });
 
@@ -43,18 +44,6 @@ function ensureSystemPromptFile(content) {
   const p = path.join(TMP_DIR, `sys-${hash}.txt`);
   if (!fs.existsSync(p)) fs.writeFileSync(p, content, 'utf8');
   return p;
-}
-
-// Windows режет CLI-аргументы с пробелами при spawn(..., {shell:true})
-// (обнаружено при сборке шлюза: пути с пробелами обрезались по первому
-// пробелу). Оборачиваем каждый аргумент в JSON.stringify — валидное
-// cmd.exe-экранирование для простых значений (пути, флаги, пустые строки).
-// На POSIX shell не используется — аргументы идут как есть.
-function buildSpawnArgs(args) {
-  if (process.platform === 'win32') {
-    return args.map((a) => JSON.stringify(String(a)));
-  }
-  return args.map(String);
 }
 
 function spawnClaudeCli(args, { input, timeoutMs }) {

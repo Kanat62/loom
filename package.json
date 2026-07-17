@@ -19,7 +19,8 @@
     "interview-eval:mock": "node --env-file=.env --env-file=.env.mock --no-warnings evals/interview.js",
     "bank": "node --env-file=.env --no-warnings evals/bank.js",
     "bank:mock": "node --env-file=.env --env-file=.env.mock --no-warnings evals/bank.js",
-    "fts-eval:mock": "node --env-file=.env --env-file=.env.mock --no-warnings evals/fts.js"
+    "fts-eval:mock": "node --env-file=.env --env-file=.env.mock --no-warnings evals/fts.js",
+    "spawn-eval": "node --no-warnings evals/spawn-windows.js"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.3.0",
