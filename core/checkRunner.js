@@ -28,6 +28,50 @@ function extractNodeEval(cmdStr) {
   return m ? m[2] : null;
 }
 
+// §29.5: живой прогон показал, что фикс 63f6c57 (npm/tsc/claude — реальные
+// вызовы в core/*.js) был ЧАСТИЧНЫМ — попытки 1-2 задачи прошли спавн Vite,
+// попытка 3/4 снова дала `spawn npx ENOENT`. Разница: 63f6c57 чинит спавны
+// ВНУТРИ кода LOOM (core/gateway.js, agents/architect.js, core/merge.js) —
+// но код КРИТЕРИЯ (`node -e "<код>"`, серверный шаблон §8.4/prompts/
+// architect.md п.6) пишет архитектор-LLM, не core/. prompts/architect.md и
+// prompts/router.md УЖЕ требуют от модели `spawn(cmd, args, {shell:
+// process.platform==='win32', ...})` в сгенерированном критерии — но
+// подтверждено вживую: prompt-guidance не держит стабильно на каждой
+// попытке (§19 «диагностическое правило четырёх уровней»: если фикс на
+// уровне Prompt не держит — чинить на уровень выше, Harness, не полагаться
+// на память модели). Здесь harness БЕЗУСЛОВНО патчит child_process.spawn/
+// execFile ВНУТРИ исполняемого .cjs-файла критерия: любой вызов с именем
+// известной shim-команды получает shell:true + квотирование на Windows,
+// даже если сгенерированный код сам об этом не позаботился (или сделал это
+// не на каждой ветке). Логика квотирования — та же дисциплина, что
+// core/spawnUtil.js:buildSpawnArgs (не require()-ится: файл критерия —
+// изолированный .cjs дочернего процесса, не часть ESM-графа LOOM).
+const SPAWN_SHIM_PREAMBLE = `
+(function() {
+  if (process.platform !== 'win32') return;
+  var cp = require('child_process');
+  var SHIM_CMDS = new Set(['npx', 'npm', 'npx.cmd', 'npm.cmd', 'vite', 'tsc', 'tsc.cmd', 'yarn', 'yarn.cmd', 'pnpm', 'pnpm.cmd']);
+  function quoteArgs(args) { return (args || []).map(function (a) { return JSON.stringify(String(a)); }); }
+  function isShim(cmd) { return typeof cmd === 'string' && SHIM_CMDS.has(cmd.toLowerCase()); }
+  var origSpawn = cp.spawn;
+  cp.spawn = function (command, args, options) {
+    if (isShim(command)) {
+      return origSpawn.call(cp, command, quoteArgs(args), Object.assign({}, options, { shell: true }));
+    }
+    return origSpawn.apply(cp, arguments);
+  };
+  var origExecFile = cp.execFile;
+  cp.execFile = function (command, args, options, callback) {
+    if (isShim(command)) {
+      var cb = typeof options === 'function' ? options : callback;
+      var opts = typeof options === 'function' ? {} : Object.assign({}, options, { shell: true });
+      return origExecFile.call(cp, command, quoteArgs(args), opts, cb);
+    }
+    return origExecFile.apply(cp, arguments);
+  };
+})();
+`;
+
 function runShellLocal(cmd, { cwd, timeout }) {
   return new Promise((resolve) => {
     let output = '';
@@ -81,7 +125,7 @@ export async function runCheck(criterion, { cwd, timeout = 10000, sandbox = 'loc
   if (evalSrc !== null) {
     const name = `.loom-check-${crypto.randomUUID().slice(0, 8)}.cjs`;
     tmpFile = path.join(cwd, name);
-    fs.writeFileSync(tmpFile, evalSrc, 'utf8');
+    fs.writeFileSync(tmpFile, SPAWN_SHIM_PREAMBLE + evalSrc, 'utf8');
     execCmd = `node ${name}`;
   }
 
