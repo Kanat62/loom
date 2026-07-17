@@ -1964,6 +1964,61 @@ async function runProjectIsolationScenario() {
   console.log('[mock] project-isolation: claimNext без projectId честно бросает исключение вместо тихого скана по всей базе.');
 }
 
+// --- Сценарий (§29.4 п.8): миграция 'default'→'legacy' идемпотентна -------
+// Фикстура — прямая вставка project_id='default' В ОБХОД fail-loud addTask
+// (симулирует РЕАЛЬНУЮ старую БД до §29, где 'default' был нормой — addTask
+// сам такую строку больше создать не может, поэтому фикстура нужна сырым SQL,
+// не публичным API). migrateLegacyDefaultProjectId() — та же функция, что
+// реальный автозапуск на каждом db() (core/journal.js:migrate), вызывается
+// здесь ДВАЖДЫ подряд, чтобы доказать идемпотентность без второго процесса.
+async function runLegacyMigrationScenario() {
+  const { openDb } = await import('./db.js');
+  const { JOURNAL_DB_PATH } = await import('./config.js');
+  const { migrateLegacyDefaultProjectId, getTask } = await import('./journal.js');
+  const { getProject, listProjects } = await import('./projects.js');
+
+  const d = openDb(JOURNAL_DB_PATH);
+  const fixtureId = 'task_legacy-migration-fixture';
+  const now = Date.now();
+  d.prepare(`DELETE FROM tasks WHERE id = ?`).run(fixtureId);
+  d.prepare(`
+    INSERT INTO tasks
+      (id, project_id, title, spec, criteria, role, type, status,
+       touches_files, touches_functions, budget_usd, spent_usd, attempts, created_at, covers)
+    VALUES (?, 'default', 'ТЕСТ_LEGACY_МИГРАЦИЯ: фикстура', 'x', '{}', 'coder', 'project', 'pending', '[]', '[]', 2.0, 0, 0, ?, '[]')
+  `).run(fixtureId, now);
+  d.prepare(`
+    INSERT OR REPLACE INTO root_spec (project_id, spec, engineering_defaults, route, domain, created_at)
+    VALUES ('default', 'фикстура root_spec для миграции', '[]', 'wish', NULL, ?)
+  `).run(now);
+
+  migrateLegacyDefaultProjectId();
+
+  const afterTask = getTask(fixtureId);
+  if (afterTask.project_id !== 'legacy') {
+    throw new Error(`legacy-migration: ожидали project_id='legacy' у задачи-фикстуры, получили ${afterTask.project_id}`);
+  }
+  const legacyProject = getProject('legacy');
+  if (!legacyProject || legacyProject.status !== 'archived') {
+    throw new Error(`legacy-migration: ожидали archived-проект 'legacy' в реестре, получили ${JSON.stringify(legacyProject)}`);
+  }
+  const rootSpecRow = d.prepare(`SELECT * FROM root_spec WHERE project_id = 'legacy'`).get();
+  if (!rootSpecRow) throw new Error("legacy-migration: root_spec с project_id='legacy' не найден после миграции");
+  console.log("[mock] legacy-migration: 'default'→'legacy' — задача и root_spec переименованы, projects('legacy', archived) создан.");
+
+  // --- повторный прогон — идемпотентность: ничего не дублируется, не падает ---
+  migrateLegacyDefaultProjectId();
+  const legacyProjectRows = listProjects({}).filter((p) => p.id === 'legacy');
+  if (legacyProjectRows.length !== 1) {
+    throw new Error(`legacy-migration: повторный прогон задублировал запись проекта 'legacy' (${legacyProjectRows.length})`);
+  }
+  const afterSecondRun = getTask(fixtureId);
+  if (afterSecondRun.project_id !== 'legacy') {
+    throw new Error('legacy-migration: повторный прогон миграции сломал project_id уже мигрированной задачи');
+  }
+  console.log('[mock] legacy-migration OK — повторный прогон миграции идемпотентен (ни дублей, ни поломки уже мигрированных строк).');
+}
+
 // --- Точка входа `npm run mock` -------------------------------------------
 async function main() {
   const { MOCK } = await import('./config.js');
@@ -2021,6 +2076,7 @@ async function main() {
     ['доменный тег: явный домен побеждает эвристику, non-ui не тратит designer (§27.1)', runDomainGateScenario],
     ['spec_writer: запись ТЗ на успехе + структурный брак без "За рамками" → жёсткий останов (§28.2)', runSpecWriterScenario],
     ['изоляция проектов: два проекта, раздельный захват/root_spec/замок пути, claimNext без projectId (§29.4 пп.1-7)', runProjectIsolationScenario],
+    ["миграция 'default'→'legacy' идемпотентна (§29.4 п.8)", runLegacyMigrationScenario],
   ];
 
   let failed = false;

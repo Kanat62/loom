@@ -3,7 +3,7 @@
 // целостность.
 import crypto from 'node:crypto';
 import { openDb } from './db.js';
-import { JOURNAL_DB_PATH } from './config.js';
+import { JOURNAL_DB_PATH, WORKSPACE } from './config.js';
 
 let _db = null;
 
@@ -30,7 +30,7 @@ function migrate(d) {
   d.exec(`
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY,
-      project_id TEXT DEFAULT 'default',
+      project_id TEXT NOT NULL,
       title TEXT,
       spec TEXT,
       criteria TEXT,
@@ -120,6 +120,45 @@ function migrate(d) {
   // проект и наследуется всеми задачами (см. setRootSpec — COALESCE не даёт
   // последующим вызовам без домена стереть уже принятое решение).
   ensureColumn(d, 'root_spec', 'domain', 'domain TEXT');
+  // events.project_id — §29.2 п.6: SQL-диагностика (§14) должна уметь резать
+  // по проекту. НЕ передаётся явно на каждый logEvent-вызов (десятки мест —
+  // gateway.js/tools.js/coordinator.js — не все знают про проект напрямую):
+  // logEvent() сама выводит его из task_id через уже загруженную задачу,
+  // когда project_id не передан явно (см. deriveProjectId ниже). Старые
+  // события (до этой колонки) остаются NULL — история не переписывается
+  // (§29.3 п.4: «старый workspace НЕ трогается»), только новые события
+  // получают project_id.
+  ensureColumn(d, 'events', 'project_id', 'project_id TEXT');
+
+  // §29.3 (шрам 35): 'default' был тихим единым project_id для ВСЕХ
+  // продуктов — переименовывается в 'legacy' один раз, чтобы 'default'
+  // больше никогда не могло возникнуть как тихий дефолт (addTask его больше
+  // не подставляет). Идемпотентно (UPDATE...WHERE — пустой набор строк
+  // после первого прогона; INSERT OR IGNORE не дублирует запись проекта) —
+  // безопасно на КАЖДОМ старте процесса, таблицы малы, полный скан не проблема.
+  migrateLegacyDefaultProjectId();
+}
+
+/**
+ * migrateLegacyDefaultProjectId() — §29.3: 'default'→'legacy' в tasks и
+ * root_spec + запись archived-проекта 'legacy' в реестре. Экспортирована
+ * ОТДЕЛЬНО от migrate() (не только внутренний шаг миграции схемы при первом
+ * db()), чтобы MOCK-сценарий проверки идемпотентности (§29.4 п.8) мог
+ * вызвать её ДВАЖДЫ напрямую на фикстурной БД без второго процесса — тот же
+ * единственный источник правды, что использует реальный автозапуск.
+ * Использует db() (не параметр d) — к моменту вызова из migrate() _db уже
+ * присвоен (см. db() выше), поэтому оба пути (авто при старте, ручной вызов
+ * из теста) бьют в одно и то же соединение.
+ */
+export function migrateLegacyDefaultProjectId() {
+  const d = db();
+  d.exec(`UPDATE tasks SET project_id = 'legacy' WHERE project_id = 'default'`);
+  d.exec(`UPDATE root_spec SET project_id = 'legacy' WHERE project_id = 'default'`);
+  const now = Date.now();
+  d.prepare(`
+    INSERT OR IGNORE INTO projects (id, title, workspace_dir, status, created_at, last_active_at)
+    VALUES ('legacy', 'Legacy (до §29)', ?, 'archived', ?, ?)
+  `).run(WORKSPACE, now, now);
 }
 
 function jsonOrNull(v) {
@@ -145,8 +184,18 @@ export function newRunId() {
  * t.deps (П§2: массив task id — настоящий fan-in через task_deps, вдобавок
  * к устаревающему одиночному blocked_by_task_id, который остаётся рабочим
  * для обратной совместимости).
+ *
+ * t.project_id ОБЯЗАТЕЛЕН (§29.3 п.2, шрам 35) — задача без project_id
+ * бросает исключение, не тихо садится в 'default'. Молчаливый '||
+ * default'-фолбэк и породил реальный инцидент §29.0 (координатор одного
+ * проекта исполнял чужие деревья); после миграции 'default' переименован в
+ * 'legacy' (migrateLegacyDefaultProjectId), так что это имя больше никогда
+ * не может возникнуть тихим дефолтом.
  */
 export function addTask(t) {
+  if (!t.project_id) {
+    throw new Error('addTask: project_id обязателен (§29.3 п.2) — тихий фолбэк на \'default\' запрещён (шрам 35)');
+  }
   const id = t.id || newId('task');
   db().prepare(`
     INSERT INTO tasks
@@ -156,7 +205,7 @@ export function addTask(t) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
-    t.project_id || 'default',
+    t.project_id,
     t.title || '',
     t.spec || '',
     jsonOrNull(t.criteria),
@@ -383,11 +432,26 @@ export function listTasks(filter = {}) {
   return db().prepare(`SELECT * FROM tasks ${where} ORDER BY created_at ASC`).all(...args);
 }
 
-/** logEvent({run_id, task_id, type, agent, duration_ms, tokens_in, tokens_out, cost_usd, payload}) */
+/**
+ * deriveProjectId(taskId) — §29.2 п.6: logEvent сама выводит project_id из
+ * задачи, когда вызывающий его не передал явно. Десятки logEvent-вызовов
+ * разбросаны по gateway.js/tools.js/coordinator.js/merge.js — заставлять
+ * каждый явно знать про текущий проект означало бы протащить projectId
+ * ЕЩЁ через кучу сигнатур ради колонки, которая и так однозначно выводима
+ * из task_id, который у события почти всегда уже есть.
+ */
+function deriveProjectId(taskId) {
+  if (!taskId) return null;
+  const row = db().prepare(`SELECT project_id FROM tasks WHERE id = ?`).get(taskId);
+  return row ? row.project_id : null;
+}
+
+/** logEvent({run_id, task_id, type, agent, duration_ms, tokens_in, tokens_out, cost_usd, payload, project_id?}) */
 export function logEvent(e) {
+  const projectId = e.project_id !== undefined ? e.project_id : deriveProjectId(e.task_id);
   db().prepare(`
-    INSERT INTO events (run_id, task_id, type, agent, duration_ms, tokens_in, tokens_out, cost_usd, payload, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO events (run_id, task_id, type, agent, duration_ms, tokens_in, tokens_out, cost_usd, payload, created_at, project_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     e.run_id || null,
     e.task_id || null,
@@ -399,13 +463,14 @@ export function logEvent(e) {
     e.cost_usd ?? null,
     jsonOrNull(e.payload),
     Date.now(),
+    projectId || null,
   );
 }
 
 export function listEvents(filter = {}) {
   const clauses = [];
   const args = [];
-  for (const col of ['run_id', 'task_id', 'type', 'agent']) {
+  for (const col of ['run_id', 'task_id', 'type', 'agent', 'project_id']) {
     if (filter[col] !== undefined) { clauses.push(`${col} = ?`); args.push(filter[col]); }
   }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -437,7 +502,7 @@ export function setRootSpec(projectId, spec, engineeringDefaults, route, domain)
   `).run(projectId, spec, jsonOrNull(engineeringDefaults), route || null, domain || null, Date.now());
 }
 
-export function getRootSpec(projectId = 'default') {
+export function getRootSpec(projectId) {
   return db().prepare(`SELECT * FROM root_spec WHERE project_id = ?`).get(projectId) || null;
 }
 
