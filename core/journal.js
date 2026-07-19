@@ -3,7 +3,7 @@
 // целостность.
 import crypto from 'node:crypto';
 import { openDb } from './db.js';
-import { JOURNAL_DB_PATH, WORKSPACE } from './config.js';
+import { JOURNAL_DB_PATH, WORKSPACE, DEFAULT_TASK_BUDGET_USD } from './config.js';
 
 let _db = null;
 
@@ -165,11 +165,6 @@ function jsonOrNull(v) {
   if (v === undefined || v === null) return null;
   return typeof v === 'string' ? v : JSON.stringify(v);
 }
-
-// Единственное число дефолтного бюджета задачи — переиспользуется addTask()
-// (t.budget_usd ?? DEFAULT_TASK_BUDGET_USD) и repairCriteria() (продление
-// бюджета на один стандартный «круг», scar 34), чтобы не разъезжаться.
-const DEFAULT_TASK_BUDGET_USD = 2.0;
 
 export function newId(prefix = 't') {
   return `${prefix}_${crypto.randomUUID()}`;

@@ -18,3 +18,4 @@ tools.mock/
 *.log
 .loom-check-*.cjs
 .loom-tmp/sys-*.txt
+backup-*/
